@@ -237,6 +237,102 @@ class VirtualTapeManager:
             logger.error(f"Failed to delete tape {tape_arn}: {e}")
             return False
 
+    def list_all_tapes_detailed(self, gateway_arn: str = None) -> Dict:
+        """
+        List all virtual tapes with detailed information for inventory purposes
+        
+        This method provides a comprehensive inventory of all virtual tapes
+        including their status, creation dates, sizes, and other metadata.
+        Useful for auditing, reporting, and understanding tape usage patterns.
+        
+        Args:
+            gateway_arn (str, optional): Specific Storage Gateway ARN to target
+        
+        Returns:
+            Dict: Comprehensive tape inventory containing:
+                - total_tapes: Total number of tapes found
+                - tapes_by_status: Dictionary grouping tapes by their status
+                - tape_details: List of all tape information
+                - total_size_bytes: Total allocated size across all tapes
+                - total_used_bytes: Total used space across all tapes
+        """
+        results = {
+            'total_tapes': 0,
+            'tapes_by_status': {},
+            'tape_details': [],
+            'total_size_bytes': 0,
+            'total_used_bytes': 0,
+            'errors': []
+        }
+
+        try:
+            # Step 1: Get basic tape information
+            logger.info("Retrieving all virtual tapes...")
+            tapes = self.list_virtual_tapes(gateway_arn)
+            results['total_tapes'] = len(tapes)
+
+            if not tapes:
+                logger.warning("No virtual tapes found")
+                return results
+
+            # Step 2: Get detailed information for all tapes
+            logger.info("Retrieving detailed tape information...")
+            tape_arns = [tape['TapeARN'] for tape in tapes]
+            detailed_tapes = self.get_tape_details(tape_arns)
+
+            # Step 3: Process and categorize tape information
+            for tape in detailed_tapes:
+                # Extract key information
+                tape_status = tape.get('TapeStatus', 'Unknown')
+                tape_size = tape.get('TapeSizeInBytes', 0)
+                tape_used = tape.get('TapeUsedInBytes', 0)
+                creation_date = tape.get('TapeCreatedDate')
+                
+                # Calculate age if creation date is available
+                age_days = None
+                if creation_date:
+                    try:
+                        now = datetime.now(timezone.utc)
+                        if creation_date.tzinfo is None:
+                            creation_date = creation_date.replace(tzinfo=timezone.utc)
+                        age_days = (now - creation_date).days
+                    except Exception as e:
+                        logger.warning(f"Could not calculate age for tape {tape.get('TapeBarcode', 'Unknown')}: {e}")
+
+                # Build detailed tape record
+                tape_record = {
+                    'arn': tape.get('TapeARN', ''),
+                    'barcode': tape.get('TapeBarcode', 'Unknown'),
+                    'status': tape_status,
+                    'size_bytes': tape_size,
+                    'used_bytes': tape_used,
+                    'creation_date': creation_date.isoformat() if creation_date else None,
+                    'age_days': age_days,
+                    'gateway_arn': tape.get('GatewayARN', ''),
+                    'pool_id': tape.get('PoolId', ''),
+                    'retention_start_date': tape.get('RetentionStartDate').isoformat() if tape.get('RetentionStartDate') else None,
+                    'pool_entry_date': tape.get('PoolEntryDate').isoformat() if tape.get('PoolEntryDate') else None
+                }
+                
+                results['tape_details'].append(tape_record)
+                
+                # Group by status for summary
+                if tape_status not in results['tapes_by_status']:
+                    results['tapes_by_status'][tape_status] = []
+                results['tapes_by_status'][tape_status].append(tape_record)
+                
+                # Accumulate size statistics
+                results['total_size_bytes'] += tape_size
+                results['total_used_bytes'] += tape_used
+
+            logger.info(f"Successfully processed {len(detailed_tapes)} tapes")
+
+        except Exception as e:
+            logger.error(f"Error in list_all_tapes_detailed: {e}")
+            results['errors'].append(str(e))
+
+        return results
+
     def delete_expired_tapes(self, expiry_days: int, dry_run: bool = True, 
                            gateway_arn: str = None, bypass_governance: bool = False) -> Dict:
         """
@@ -343,6 +439,133 @@ class VirtualTapeManager:
 
         return results
 
+    def delete_specific_tapes(self, tape_list: List[str], dry_run: bool = True, 
+                            bypass_governance: bool = False) -> Dict:
+        """
+        Delete specific virtual tapes provided in a list
+        
+        This method allows deletion of specific tapes identified by their ARNs
+        or barcodes, rather than using age-based expiry criteria. Useful for
+        targeted cleanup or when specific tapes need to be removed.
+        
+        Args:
+            tape_list (List[str]): List of tape ARNs or barcodes to delete
+            dry_run (bool): If True, only simulate deletion without actually deleting
+            bypass_governance (bool): Whether to bypass governance retention policies
+        
+        Returns:
+            Dict: Results summary containing:
+                - total_tapes_requested: Number of tapes in the input list
+                - tapes_found: Number of requested tapes that were found
+                - tapes_not_found: Number of requested tapes that were not found
+                - deleted_tapes: Number of tapes successfully deleted
+                - failed_deletions: Number of deletion attempts that failed
+                - errors: List of error messages encountered
+        
+        Note:
+            - Input can be either tape ARNs or barcodes
+            - Only tapes in deletable states will be processed
+            - Provides detailed reporting on each tape's processing status
+        """
+        results = {
+            'total_tapes_requested': len(tape_list),
+            'tapes_found': 0,
+            'tapes_not_found': 0,
+            'deleted_tapes': 0,
+            'failed_deletions': 0,
+            'errors': [],
+            'not_found_tapes': [],
+            'processed_tapes': []
+        }
+
+        try:
+            logger.info(f"Processing {len(tape_list)} specific tapes for deletion")
+            
+            # Step 1: Get all available tapes to match against the provided list
+            all_tapes = self.list_virtual_tapes()
+            if not all_tapes:
+                logger.warning("No virtual tapes found in the system")
+                results['errors'].append("No virtual tapes found in the system")
+                return results
+
+            # Step 2: Get detailed information for all tapes
+            tape_arns = [tape['TapeARN'] for tape in all_tapes]
+            detailed_tapes = self.get_tape_details(tape_arns)
+
+            # Step 3: Create lookup dictionaries for both ARNs and barcodes
+            tape_by_arn = {tape['TapeARN']: tape for tape in detailed_tapes}
+            tape_by_barcode = {tape.get('TapeBarcode', ''): tape for tape in detailed_tapes}
+
+            # Step 4: Process each tape in the provided list
+            for tape_identifier in tape_list:
+                tape_identifier = tape_identifier.strip()
+                logger.info(f"Processing tape identifier: {tape_identifier}")
+                
+                # Try to find the tape by ARN first, then by barcode
+                target_tape = None
+                if tape_identifier in tape_by_arn:
+                    target_tape = tape_by_arn[tape_identifier]
+                elif tape_identifier in tape_by_barcode:
+                    target_tape = tape_by_barcode[tape_identifier]
+                
+                if not target_tape:
+                    # Tape not found
+                    logger.warning(f"Tape not found: {tape_identifier}")
+                    results['tapes_not_found'] += 1
+                    results['not_found_tapes'].append(tape_identifier)
+                    results['errors'].append(f"Tape not found: {tape_identifier}")
+                    continue
+
+                # Tape found - extract information
+                results['tapes_found'] += 1
+                tape_arn = target_tape['TapeARN']
+                tape_barcode = target_tape.get('TapeBarcode', 'Unknown')
+                tape_status = target_tape.get('TapeStatus', 'Unknown')
+                
+                tape_info = {
+                    'identifier': tape_identifier,
+                    'arn': tape_arn,
+                    'barcode': tape_barcode,
+                    'status': tape_status,
+                    'action_taken': None,
+                    'success': False
+                }
+                
+                logger.info(f"Found tape: {tape_barcode} (Status: {tape_status})")
+                
+                if dry_run:
+                    # Dry-run mode: Log what would be deleted
+                    logger.info(f"DRY RUN: Would delete tape {tape_barcode} ({tape_arn})")
+                    tape_info['action_taken'] = 'would_delete'
+                    tape_info['success'] = True
+                    results['deleted_tapes'] += 1
+                else:
+                    # Actual deletion mode: Check status and attempt deletion
+                    if tape_status in ['AVAILABLE', 'ARCHIVED']:
+                        if self.delete_virtual_tape(tape_arn, bypass_governance):
+                            tape_info['action_taken'] = 'deleted'
+                            tape_info['success'] = True
+                            results['deleted_tapes'] += 1
+                        else:
+                            tape_info['action_taken'] = 'delete_failed'
+                            tape_info['success'] = False
+                            results['failed_deletions'] += 1
+                            results['errors'].append(f"Failed to delete {tape_barcode}")
+                    else:
+                        # Skip tapes that are not in a deletable state
+                        logger.warning(f"Skipping tape {tape_barcode} - Status: {tape_status} (not deletable)")
+                        tape_info['action_taken'] = 'skipped_not_deletable'
+                        tape_info['success'] = False
+                        results['errors'].append(f"Tape {tape_barcode} not in deletable state: {tape_status}")
+
+                results['processed_tapes'].append(tape_info)
+
+        except Exception as e:
+            logger.error(f"Error in delete_specific_tapes: {e}")
+            results['errors'].append(str(e))
+
+        return results
+
 def main():
     """
     Main entry point for the virtual tape cleanup script
@@ -397,55 +620,189 @@ Examples:
     parser.add_argument('--bypass-governance', action='store_true',
                        help='Bypass governance retention policies for deletion (use with caution)')
     
+    # Operation mode flags - mutually exclusive group
+    operation_group = parser.add_mutually_exclusive_group(required=False)
+    operation_group.add_argument('--list-all', action='store_true',
+                               help='List all virtual tapes with detailed information (inventory mode)')
+    operation_group.add_argument('--delete-expired', action='store_true', default=True,
+                               help='Delete expired tapes based on age threshold (default mode)')
+    operation_group.add_argument('--delete-specific', action='store_true',
+                               help='Delete specific tapes from a provided list')
+    
+    # Tape list specification options
+    parser.add_argument('--tape-list', 
+                       help='Comma-separated list of tape ARNs or barcodes to delete (use with --delete-specific)')
+    parser.add_argument('--tape-file', 
+                       help='File containing list of tape ARNs or barcodes (one per line, use with --delete-specific)')
+    
     # Parse command-line arguments
     args = parser.parse_args()
+
+    # Validate operation mode and required parameters
+    if args.delete_specific and not args.tape_list and not args.tape_file:
+        logger.error("--delete-specific requires either --tape-list or --tape-file")
+        sys.exit(1)
+    
+    if (args.tape_list or args.tape_file) and not args.delete_specific:
+        logger.error("--tape-list and --tape-file can only be used with --delete-specific")
+        sys.exit(1)
 
     # Determine execution mode: dry-run is default unless --execute is specified
     # This provides an extra safety layer to prevent accidental deletions
     dry_run = not args.execute
 
+    # Determine operation mode
+    if args.list_all:
+        operation_mode = "list_all"
+    elif args.delete_specific:
+        operation_mode = "delete_specific"
+    else:
+        operation_mode = "delete_expired"  # Default mode
+
+    # Parse tape list if provided
+    tape_list = []
+    if args.delete_specific:
+        if args.tape_list:
+            # Parse comma-separated list
+            tape_list = [tape.strip() for tape in args.tape_list.split(',') if tape.strip()]
+        elif args.tape_file:
+            # Read from file
+            try:
+                with open(args.tape_file, 'r') as f:
+                    tape_list = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
+            except FileNotFoundError:
+                logger.error(f"Tape file not found: {args.tape_file}")
+                sys.exit(1)
+            except Exception as e:
+                logger.error(f"Error reading tape file {args.tape_file}: {e}")
+                sys.exit(1)
+        
+        if not tape_list:
+            logger.error("No tapes specified for deletion")
+            sys.exit(1)
+
     # Log startup information for audit trail
     logger.info("="*60)
-    logger.info("Starting Virtual Tape Cleanup Process")
+    logger.info("Starting Virtual Tape Management Process")
     logger.info("="*60)
+    logger.info(f"Operation mode: {operation_mode}")
     logger.info(f"Region: {args.region}")
     logger.info(f"Profile: {args.profile or 'default'}")
-    logger.info(f"Expiry threshold: {args.expiry_days} days")
+    if operation_mode == "delete_expired":
+        logger.info(f"Expiry threshold: {args.expiry_days} days")
+    elif operation_mode == "delete_specific":
+        logger.info(f"Tapes to process: {len(tape_list)}")
     logger.info(f"Gateway ARN: {args.gateway_arn or 'all gateways'}")
-    logger.info(f"Mode: {'DRY RUN' if dry_run else 'EXECUTE'}")
-    logger.info(f"Bypass governance: {args.bypass_governance}")
+    if operation_mode != "list_all":
+        logger.info(f"Mode: {'DRY RUN' if dry_run else 'EXECUTE'}")
+        logger.info(f"Bypass governance: {args.bypass_governance}")
     logger.info("="*60)
 
     # Initialize the tape manager with specified AWS configuration
     tape_manager = VirtualTapeManager(args.region, args.profile)
 
-    # Execute the main cleanup process
-    results = tape_manager.delete_expired_tapes(
-        expiry_days=args.expiry_days,
-        dry_run=dry_run,
-        gateway_arn=args.gateway_arn,
-        bypass_governance=args.bypass_governance
-    )
+    # Execute the appropriate operation based on mode
+    if operation_mode == "list_all":
+        # List all tapes mode
+        results = tape_manager.list_all_tapes_detailed(args.gateway_arn)
+        
+        # Display comprehensive tape inventory
+        print("\n" + "="*60)
+        print("VIRTUAL TAPE INVENTORY")
+        print("="*60)
+        print(f"Total tapes found: {results['total_tapes']}")
+        print(f"Total allocated size: {results['total_size_bytes']:,} bytes ({results['total_size_bytes'] / (1024**3):.2f} GB)")
+        print(f"Total used size: {results['total_used_bytes']:,} bytes ({results['total_used_bytes'] / (1024**3):.2f} GB)")
+        
+        # Display tapes by status
+        if results['tapes_by_status']:
+            print(f"\nTapes by status:")
+            for status, tapes in results['tapes_by_status'].items():
+                print(f"  {status}: {len(tapes)} tapes")
+        
+        # Display detailed tape information
+        if results['tape_details']:
+            print(f"\nDetailed tape information:")
+            print(f"{'Barcode':<15} {'Status':<12} {'Age (days)':<10} {'Size (GB)':<10} {'Used (GB)':<10}")
+            print("-" * 70)
+            for tape in results['tape_details']:
+                size_gb = tape['size_bytes'] / (1024**3) if tape['size_bytes'] else 0
+                used_gb = tape['used_bytes'] / (1024**3) if tape['used_bytes'] else 0
+                age_str = str(tape['age_days']) if tape['age_days'] is not None else 'Unknown'
+                print(f"{tape['barcode']:<15} {tape['status']:<12} {age_str:<10} {size_gb:<10.2f} {used_gb:<10.2f}")
+        
+        # Display any errors
+        if results['errors']:
+            print(f"\nErrors encountered:")
+            for error in results['errors']:
+                print(f"  - {error}")
+                
+    elif operation_mode == "delete_specific":
+        # Delete specific tapes mode
+        results = tape_manager.delete_specific_tapes(
+            tape_list=tape_list,
+            dry_run=dry_run,
+            bypass_governance=args.bypass_governance
+        )
+        
+        # Display specific tape deletion results
+        print("\n" + "="*60)
+        print("SPECIFIC TAPE DELETION RESULTS")
+        print("="*60)
+        print(f"Tapes requested for deletion: {results['total_tapes_requested']}")
+        print(f"Tapes found: {results['tapes_found']}")
+        print(f"Tapes not found: {results['tapes_not_found']}")
+        print(f"{'Would delete' if dry_run else 'Deleted'}: {results['deleted_tapes']}")
+        print(f"Failed deletions: {results['failed_deletions']}")
+        
+        # Display detailed processing results
+        if results['processed_tapes']:
+            print(f"\nDetailed processing results:")
+            print(f"{'Identifier':<20} {'Barcode':<15} {'Status':<12} {'Action':<20}")
+            print("-" * 75)
+            for tape in results['processed_tapes']:
+                print(f"{tape['identifier']:<20} {tape['barcode']:<15} {tape['status']:<12} {tape['action_taken']:<20}")
+        
+        # Display not found tapes
+        if results['not_found_tapes']:
+            print(f"\nTapes not found:")
+            for tape_id in results['not_found_tapes']:
+                print(f"  - {tape_id}")
+        
+        # Display errors
+        if results['errors']:
+            print(f"\nErrors encountered:")
+            for error in results['errors']:
+                print(f"  - {error}")
+                
+    else:
+        # Delete expired tapes mode (default)
+        results = tape_manager.delete_expired_tapes(
+            expiry_days=args.expiry_days,
+            dry_run=dry_run,
+            gateway_arn=args.gateway_arn,
+            bypass_governance=args.bypass_governance
+        )
+        
+        # Display expired tape deletion results
+        print("\n" + "="*50)
+        print("EXPIRED TAPE CLEANUP RESULTS")
+        print("="*50)
+        print(f"Total tapes found: {results['total_tapes']}")
+        print(f"Expired tapes: {results['expired_tapes']}")
+        print(f"{'Would delete' if dry_run else 'Deleted'}: {results['deleted_tapes']}")
+        print(f"Failed deletions: {results['failed_deletions']}")
+        
+        # Display any errors encountered during processing
+        if results['errors']:
+            print(f"\nErrors encountered:")
+            for error in results['errors']:
+                print(f"  - {error}")
 
-    # Display comprehensive results summary
-    print("\n" + "="*50)
-    print("VIRTUAL TAPE CLEANUP RESULTS")
-    print("="*50)
-    print(f"Total tapes found: {results['total_tapes']}")
-    print(f"Expired tapes: {results['expired_tapes']}")
-    print(f"{'Would delete' if dry_run else 'Deleted'}: {results['deleted_tapes']}")
-    print(f"Failed deletions: {results['failed_deletions']}")
-    
-    # Display any errors encountered during processing
-    if results['errors']:
-        print(f"\nErrors encountered:")
-        for error in results['errors']:
-            print(f"  - {error}")
-
-    # Provide guidance for next steps if in dry-run mode
-    if dry_run and results['expired_tapes'] > 0:
-        print(f"\nTo actually delete the tapes, run with --execute flag")
-        print(f"Command: python3 {sys.argv[0]} {' '.join(sys.argv[1:])} --execute")
+        # Provide guidance for next steps if in dry-run mode
+        if dry_run and results['expired_tapes'] > 0:
+            print(f"\nTo actually delete the tapes, run with --execute flag")
+            print(f"Command: python3 {sys.argv[0]} {' '.join(sys.argv[1:])} --execute")
 
     # Log completion
     logger.info("Virtual Tape Cleanup Process Completed")

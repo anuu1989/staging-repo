@@ -38,6 +38,15 @@ DRY_RUN=true                # Default to safe dry-run mode
 GATEWAY_ARN=""              # Specific gateway ARN (optional)
 BYPASS_GOVERNANCE=false     # Default to respecting governance retention
 
+# Operation mode flags (mutually exclusive)
+LIST_ALL=false              # List all tapes mode
+DELETE_EXPIRED=true         # Delete expired tapes mode (default)
+DELETE_SPECIFIC=false       # Delete specific tapes mode
+
+# Tape specification options (for delete-specific mode)
+TAPE_LIST=""                # Comma-separated list of tapes
+TAPE_FILE=""                # File containing tape list
+
 #==============================================================================
 # COLOR DEFINITIONS FOR OUTPUT FORMATTING
 #==============================================================================
@@ -101,7 +110,7 @@ OPTIONAL PARAMETERS:
                                Uses default AWS credentials if not specified
                                
     -d, --expiry-days DAYS      Number of days after which tapes are considered expired
-                               Default: 30 days
+                               Default: 30 days (only used with --delete-expired)
                                
     -g, --gateway-arn ARN       Specific Storage Gateway ARN to target
                                If not specified, processes all gateways in region
@@ -111,6 +120,23 @@ OPTIONAL PARAMETERS:
                                
     --bypass-governance         Bypass governance retention policies
                                Use with caution - may override compliance controls
+
+OPERATION MODE OPTIONS (mutually exclusive):
+    --list-all                  List all virtual tapes with detailed information
+                               Provides comprehensive inventory report
+                               
+    --delete-expired            Delete expired tapes based on age threshold
+                               This is the default operation mode
+                               
+    --delete-specific           Delete specific tapes from a provided list
+                               Requires --tape-list or --tape-file
+
+TAPE SPECIFICATION OPTIONS (for --delete-specific):
+    --tape-list "tape1,tape2"   Comma-separated list of tape ARNs or barcodes
+                               Example: "VTL001,VTL002,arn:aws:storagegateway:..."
+                               
+    --tape-file FILE            File containing tape ARNs or barcodes (one per line)
+                               Lines starting with # are treated as comments
                                
     -h, --help                  Show this help message and exit
 
@@ -122,11 +148,20 @@ SAFETY FEATURES:
     • Validates all prerequisites before execution
 
 EXAMPLES:
-    # Safe dry-run to preview what would be deleted (recommended first step)
+    # List all virtual tapes (inventory mode)
+    $0 --region us-east-1 --list-all
+
+    # Safe dry-run to preview what expired tapes would be deleted (default mode)
     $0 --region us-east-1 --expiry-days 60
 
     # Actually delete expired tapes after reviewing dry-run results
     $0 --region us-east-1 --expiry-days 60 --execute
+
+    # Delete specific tapes by barcode/ARN (dry-run)
+    $0 --region us-east-1 --delete-specific --tape-list "VTL001,VTL002,VTL003"
+
+    # Delete specific tapes from file (actual deletion)
+    $0 --region us-east-1 --delete-specific --tape-file tapes_to_delete.txt --execute
 
     # Use specific AWS profile for multi-account environments
     $0 --region us-west-2 --profile production --expiry-days 90 --execute
@@ -192,6 +227,37 @@ while [[ $# -gt 0 ]]; do
             BYPASS_GOVERNANCE=true
             shift 1
             ;;
+        --list-all)
+            # List all tapes mode
+            LIST_ALL=true
+            DELETE_EXPIRED=false
+            DELETE_SPECIFIC=false
+            shift 1
+            ;;
+        --delete-expired)
+            # Delete expired tapes mode (default, but can be explicit)
+            DELETE_EXPIRED=true
+            LIST_ALL=false
+            DELETE_SPECIFIC=false
+            shift 1
+            ;;
+        --delete-specific)
+            # Delete specific tapes mode
+            DELETE_SPECIFIC=true
+            LIST_ALL=false
+            DELETE_EXPIRED=false
+            shift 1
+            ;;
+        --tape-list)
+            # Comma-separated list of tapes to delete
+            TAPE_LIST="$2"
+            shift 2
+            ;;
+        --tape-file)
+            # File containing list of tapes to delete
+            TAPE_FILE="$2"
+            shift 2
+            ;;
         -h|--help)
             # Display help information and exit
             show_usage
@@ -221,9 +287,40 @@ if [[ -z "$REGION" ]]; then
     exit 1
 fi
 
+# Validate operation mode specific requirements
+if [[ "$DELETE_SPECIFIC" == "true" ]]; then
+    if [[ -z "$TAPE_LIST" && -z "$TAPE_FILE" ]]; then
+        print_error "--delete-specific requires either --tape-list or --tape-file"
+        echo ""
+        show_usage
+        exit 1
+    fi
+    
+    if [[ -n "$TAPE_LIST" && -n "$TAPE_FILE" ]]; then
+        print_error "Cannot specify both --tape-list and --tape-file"
+        echo ""
+        show_usage
+        exit 1
+    fi
+fi
+
+# Validate that tape list/file options are only used with delete-specific mode
+if [[ -n "$TAPE_LIST" || -n "$TAPE_FILE" ]] && [[ "$DELETE_SPECIFIC" != "true" ]]; then
+    print_error "--tape-list and --tape-file can only be used with --delete-specific"
+    echo ""
+    show_usage
+    exit 1
+fi
+
 # Validate that the expiry days is a positive number
 if [[ ! "$EXPIRY_DAYS" =~ ^[0-9]+$ ]] || [[ "$EXPIRY_DAYS" -le 0 ]]; then
     print_error "Expiry days must be a positive integer, got: $EXPIRY_DAYS"
+    exit 1
+fi
+
+# Validate tape file exists if specified
+if [[ -n "$TAPE_FILE" && ! -f "$TAPE_FILE" ]]; then
+    print_error "Tape file not found: $TAPE_FILE"
     exit 1
 fi
 
@@ -277,11 +374,21 @@ print_info "All prerequisites satisfied"
 
 # Build the Python command with all specified parameters
 # Start with the base command and region (which is always required)
-CMD="python3 delete_expired_virtual_tapes.py --region $REGION --expiry-days $EXPIRY_DAYS"
+CMD="python3 delete_expired_virtual_tapes.py --region $REGION"
 
-# Add optional parameters only if they were specified
-# This prevents passing empty values to the Python script
+# Add operation mode flags
+if [[ "$LIST_ALL" == "true" ]]; then
+    CMD="$CMD --list-all"
+    print_info "Operation mode: List all tapes (inventory)"
+elif [[ "$DELETE_SPECIFIC" == "true" ]]; then
+    CMD="$CMD --delete-specific"
+    print_info "Operation mode: Delete specific tapes"
+else
+    CMD="$CMD --delete-expired"
+    print_info "Operation mode: Delete expired tapes"
+fi
 
+# Add common optional parameters only if they were specified
 if [[ -n "$PROFILE" ]]; then
     CMD="$CMD --profile $PROFILE"
     print_info "Using AWS profile: $PROFILE"
@@ -292,15 +399,33 @@ if [[ -n "$GATEWAY_ARN" ]]; then
     print_info "Targeting specific gateway: $GATEWAY_ARN"
 fi
 
-# Add execution mode flag if not in dry-run
-if [[ "$DRY_RUN" == "false" ]]; then
-    CMD="$CMD --execute"
+# Add mode-specific parameters
+if [[ "$DELETE_EXPIRED" == "true" ]]; then
+    CMD="$CMD --expiry-days $EXPIRY_DAYS"
+    print_info "Expiry threshold: $EXPIRY_DAYS days"
 fi
 
-# Add governance bypass flag if specified
-if [[ "$BYPASS_GOVERNANCE" == "true" ]]; then
-    CMD="$CMD --bypass-governance"
-    print_warning "Governance retention bypass enabled - use with caution"
+if [[ "$DELETE_SPECIFIC" == "true" ]]; then
+    if [[ -n "$TAPE_LIST" ]]; then
+        CMD="$CMD --tape-list \"$TAPE_LIST\""
+        print_info "Using tape list: $TAPE_LIST"
+    elif [[ -n "$TAPE_FILE" ]]; then
+        CMD="$CMD --tape-file \"$TAPE_FILE\""
+        print_info "Using tape file: $TAPE_FILE"
+    fi
+fi
+
+# Add execution mode flag if not in dry-run (only for deletion operations)
+if [[ "$LIST_ALL" != "true" ]]; then
+    if [[ "$DRY_RUN" == "false" ]]; then
+        CMD="$CMD --execute"
+    fi
+    
+    # Add governance bypass flag if specified
+    if [[ "$BYPASS_GOVERNANCE" == "true" ]]; then
+        CMD="$CMD --bypass-governance"
+        print_warning "Governance retention bypass enabled - use with caution"
+    fi
 fi
 
 #==============================================================================
@@ -312,24 +437,44 @@ echo ""
 print_info "=== EXECUTION SUMMARY ==="
 print_info "Region: $REGION"
 print_info "Profile: ${PROFILE:-default}"
-print_info "Expiry threshold: $EXPIRY_DAYS days"
+
+if [[ "$LIST_ALL" == "true" ]]; then
+    print_info "Operation: List all virtual tapes"
+elif [[ "$DELETE_SPECIFIC" == "true" ]]; then
+    print_info "Operation: Delete specific tapes"
+    if [[ -n "$TAPE_LIST" ]]; then
+        print_info "Tape list: $TAPE_LIST"
+    else
+        print_info "Tape file: $TAPE_FILE"
+    fi
+else
+    print_info "Operation: Delete expired tapes"
+    print_info "Expiry threshold: $EXPIRY_DAYS days"
+fi
+
 print_info "Gateway ARN: ${GATEWAY_ARN:-all gateways in region}"
-print_info "Mode: $(if [[ "$DRY_RUN" == "true" ]]; then echo "DRY RUN"; else echo "EXECUTE"; fi)"
-print_info "Bypass governance: $BYPASS_GOVERNANCE"
+
+if [[ "$LIST_ALL" != "true" ]]; then
+    print_info "Mode: $(if [[ "$DRY_RUN" == "true" ]]; then echo "DRY RUN"; else echo "EXECUTE"; fi)"
+    print_info "Bypass governance: $BYPASS_GOVERNANCE"
+fi
 echo ""
 
 # Show the exact command that will be executed for transparency
 print_info "Executing command: $CMD"
 echo ""
 
-# Provide appropriate warnings based on execution mode
-if [[ "$DRY_RUN" == "true" ]]; then
+# Provide appropriate warnings based on operation mode
+if [[ "$LIST_ALL" == "true" ]]; then
+    print_info "Listing all virtual tapes (read-only operation)"
+    echo ""
+elif [[ "$DRY_RUN" == "true" ]]; then
     print_warning "This is a DRY RUN. No tapes will actually be deleted."
     print_warning "Use --execute flag to actually delete tapes."
     echo ""
 else
     # For actual execution, provide strong warnings and require confirmation
-    print_warning "⚠️  DANGER: This will ACTUALLY DELETE expired virtual tapes! ⚠️"
+    print_warning "⚠️  DANGER: This will ACTUALLY DELETE virtual tapes! ⚠️"
     print_warning "This action is PERMANENT and CANNOT be undone!"
     print_warning "Deleted tapes cannot be recovered!"
     echo ""
@@ -355,7 +500,7 @@ fi
 
 # Execute the constructed Python command
 # The 'eval' command allows us to execute the dynamically built command string
-print_info "Starting virtual tape cleanup process..."
+print_info "Starting virtual tape management process..."
 eval $CMD
 
 # Capture the exit code from the Python script
@@ -364,8 +509,12 @@ PYTHON_EXIT_CODE=$?
 # Provide final status message based on execution result
 echo ""
 if [[ $PYTHON_EXIT_CODE -eq 0 ]]; then
-    print_info "Virtual tape cleanup completed successfully"
+    if [[ "$LIST_ALL" == "true" ]]; then
+        print_info "Virtual tape inventory completed successfully"
+    else
+        print_info "Virtual tape management completed successfully"
+    fi
 else
-    print_error "Virtual tape cleanup failed with exit code: $PYTHON_EXIT_CODE"
+    print_error "Virtual tape management failed with exit code: $PYTHON_EXIT_CODE"
     exit $PYTHON_EXIT_CODE
 fi
