@@ -175,13 +175,68 @@ class VirtualTapeManager:
         
         Note:
             This API call is more expensive than list_tapes as it returns
-            detailed information. Only call for tapes you actually need to analyze.
+            detailed information. The describe_tapes API requires a GatewayARN,
+            so we extract it from the tape ARNs and group by gateway.
         """
+        if not tape_arns:
+            return []
+            
         try:
-            # Call AWS API to get detailed tape information
-            # This provides creation dates and other metadata needed for expiry checks
-            response = self.storagegateway.describe_tapes(TapeARNs=tape_arns)
-            return response.get('Tapes', [])
+            all_detailed_tapes = []
+            
+            # Group tape ARNs by gateway
+            # Tape ARN format: arn:aws:storagegateway:region:account:tape/gateway-id/tape-id
+            # Gateway ARN format: arn:aws:storagegateway:region:account:gateway/gateway-id
+            tapes_by_gateway = {}
+            
+            for tape_arn in tape_arns:
+                try:
+                    # Extract gateway ARN from tape ARN
+                    # Split the ARN and reconstruct the gateway ARN
+                    arn_parts = tape_arn.split(':')
+                    if len(arn_parts) >= 6:
+                        # arn:aws:storagegateway:region:account:tape/gateway-id/tape-id
+                        resource_part = arn_parts[5]  # tape/gateway-id/tape-id
+                        resource_parts = resource_part.split('/')
+                        if len(resource_parts) >= 2:
+                            gateway_id = resource_parts[1]
+                            # Reconstruct gateway ARN
+                            gateway_arn = f"{':'.join(arn_parts[:5])}:gateway/{gateway_id}"
+                            
+                            if gateway_arn not in tapes_by_gateway:
+                                tapes_by_gateway[gateway_arn] = []
+                            tapes_by_gateway[gateway_arn].append(tape_arn)
+                        else:
+                            logger.warning(f"Invalid tape ARN format: {tape_arn}")
+                    else:
+                        logger.warning(f"Invalid ARN format: {tape_arn}")
+                except Exception as e:
+                    logger.warning(f"Failed to parse tape ARN {tape_arn}: {e}")
+                    continue
+            
+            # Call describe_tapes for each gateway
+            for gateway_arn, gateway_tape_arns in tapes_by_gateway.items():
+                try:
+                    logger.info(f"Getting details for {len(gateway_tape_arns)} tapes from gateway {gateway_arn}")
+                    
+                    # Call AWS API to get detailed tape information for this gateway
+                    response = self.storagegateway.describe_tapes(
+                        GatewayARN=gateway_arn,
+                        TapeARNs=gateway_tape_arns
+                    )
+                    
+                    detailed_tapes = response.get('Tapes', [])
+                    all_detailed_tapes.extend(detailed_tapes)
+                    
+                    logger.info(f"Retrieved details for {len(detailed_tapes)} tapes from gateway {gateway_arn}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to get tape details for gateway {gateway_arn}: {e}")
+                    continue
+            
+            logger.info(f"Successfully retrieved details for {len(all_detailed_tapes)} total tapes")
+            return all_detailed_tapes
+            
         except Exception as e:
             # Log error and return empty list - allows caller to handle gracefully
             logger.error(f"Failed to get tape details: {e}")

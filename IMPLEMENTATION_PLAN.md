@@ -680,6 +680,73 @@ BACKUP_RETENTION_DAYS=365
 ```
 
 ### Appendix C: Troubleshooting Guide
+
+#### Common Error Messages and Solutions
+
+**"Parameter validation failed: Missing required parameter GatewayARN"**
+- **Cause**: AWS Storage Gateway APIs require gateway ARN specification
+- **Solution**: Script automatically extracts gateway ARNs from tape ARNs
+- **Verification**: Check that tape ARNs follow correct format
+
+**"Unable to locate credentials"**
+- **Cause**: AWS credentials not configured or expired
+- **Solution**: Run `aws-azure-login --profile ap-prod` to authenticate
+- **Verification**: Test with `aws sts get-caller-identity --profile ap-prod`
+
+**"Access Denied" or "UnauthorizedOperation"**
+- **Cause**: Insufficient IAM permissions
+- **Solution**: Verify IAM policy includes required Storage Gateway permissions
+- **Required Actions**: `storagegateway:ListTapes`, `storagegateway:DescribeTapes`, `storagegateway:DeleteTape`
+
+**"No virtual tapes found"**
+- **Possible Causes**: 
+  - No Storage Gateways in the specified region
+  - No virtual tapes created
+  - Incorrect region specified
+  - Authentication/permission issues
+- **Troubleshooting Steps**:
+  1. Verify region has Storage Gateways: `aws storagegateway list-gateways --region <region> --profile ap-prod`
+  2. Check authentication: `aws sts get-caller-identity --profile ap-prod`
+  3. Verify permissions with a simple list operation
+
+### Appendix D: Known Issues and Resolutions
+
+#### AWS Storage Gateway API Requirements
+**Issue**: Parameter validation errors with Storage Gateway APIs
+- **Root Cause**: Both `list_tapes` and `describe_tapes` APIs require `GatewayARN` parameters
+- **Solution Implemented**: 
+  - Enhanced ARN parsing to extract gateway information from tape ARNs
+  - Implemented gateway grouping for efficient API calls
+  - Added robust error handling for malformed ARNs
+
+**Code Example**:
+```python
+# Extract gateway ARN from tape ARN
+# arn:aws:storagegateway:region:account:tape/gateway-id/tape-id
+# becomes: arn:aws:storagegateway:region:account:gateway/gateway-id
+arn_parts = tape_arn.split(':')
+resource_part = arn_parts[5]  # tape/gateway-id/tape-id
+gateway_id = resource_part.split('/')[1]
+gateway_arn = f"{':'.join(arn_parts[:5])}:gateway/{gateway_id}"
+```
+
+#### aws-azure-login Integration
+**Issue**: Session management and authentication flow
+- **Considerations**: 
+  - Sessions typically expire after 1-12 hours
+  - Re-authentication required for long-running operations
+  - MFA prompts may interrupt automated processes
+
+**Mitigation Strategies**:
+```bash
+# Session validation wrapper
+validate_session() {
+    aws sts get-caller-identity --profile ap-prod >/dev/null 2>&1 || {
+        echo "Session expired, re-authenticating..."
+        aws-azure-login --profile ap-prod
+    }
+}
+```
 - **Authentication Issues**: aws-azure-login troubleshooting
 - **Permission Errors**: IAM policy verification
 - **Network Issues**: Connectivity troubleshooting

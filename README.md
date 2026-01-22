@@ -348,7 +348,17 @@ Tapes not found:
 4. **Tape Not Deletable**: Some tapes may be in use or have retention policies preventing deletion
 5. **File Not Found**: When using `--tape-file`, ensure the file path is correct and accessible
 6. **Invalid Tape Identifier**: Verify tape barcodes/ARNs are correct and exist in the system
-7. **API Parameter Errors**: Ensure you're using the correct AWS region and have proper permissions
+7. **API Parameter Errors**: The script automatically handles AWS API requirements for GatewayARN parameters
+
+### API Requirements Note
+
+The AWS Storage Gateway APIs (`list_tapes` and `describe_tapes`) require `GatewayARN` parameters. This script automatically:
+- Extracts gateway information from tape ARNs
+- Groups tapes by their parent gateway
+- Makes separate API calls for each gateway
+- Handles ARN parsing errors gracefully
+
+This ensures compatibility with AWS API requirements while providing a seamless user experience.
 
 ### Debug Steps
 
