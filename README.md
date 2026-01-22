@@ -212,10 +212,17 @@ TAPE004
 VTL005
 ```
 
+**File Creation Behavior:**
+- **Always Created**: The output file is created regardless of whether tapes are found
+- **Empty Results**: If no tapes are found, the file contains header comments and a "No tapes found" note
+- **With Results**: If tapes are found, each tape barcode is listed on a separate line
+- **Ready to Use**: The file format is immediately compatible with `--delete-specific --tape-file`
+
 This file can be:
 - **Edited** to remove tapes you want to keep
 - **Used directly** with `--delete-specific --tape-file`
 - **Shared** for review and approval processes
+- **Archived** for audit and compliance purposes
 
 ## Manual Tape List File Format
 

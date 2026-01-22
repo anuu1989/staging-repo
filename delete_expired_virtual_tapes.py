@@ -213,6 +213,17 @@ class VirtualTapeManager:
                     
                     logger.info(f"Found {len(gateways)} Storage Gateway(s), checking each for requested tapes")
                     
+                    # Log the gateways we found for debugging
+                    for gw in gateways:
+                        logger.info(f"  - Gateway: {gw.get('GatewayName', 'Unknown')} ({gw.get('GatewayARN', 'No ARN')})")
+                    
+                    # Log a sample of tape ARNs we're looking for
+                    if len(remaining_tape_arns) <= 5:
+                        logger.info(f"Looking for tapes: {list(remaining_tape_arns)}")
+                    else:
+                        sample_arns = list(remaining_tape_arns)[:3]
+                        logger.info(f"Looking for {len(remaining_tape_arns)} tapes, sample: {sample_arns}...")
+                    
                     # Try each gateway to find our tapes
                     remaining_tape_arns = set(tape_arns)
                     
@@ -230,28 +241,71 @@ class VirtualTapeManager:
                             logger.info(f"Checking gateway: {gateway_name} ({current_gateway_arn})")
                             
                             # Try to get details for remaining tapes from this gateway
-                            response = self.storagegateway.describe_tapes(
-                                GatewayARN=current_gateway_arn,
-                                TapeARNs=list(remaining_tape_arns)
-                            )
+                            # Batch the requests to avoid API limits (AWS typically allows 100 items per request)
+                            remaining_list = list(remaining_tape_arns)
+                            batch_size = 100
                             
-                            detailed_tapes = response.get('Tapes', [])
-                            if detailed_tapes:
-                                all_detailed_tapes.extend(detailed_tapes)
+                            for i in range(0, len(remaining_list), batch_size):
+                                batch_arns = remaining_list[i:i + batch_size]
                                 
-                                # Remove found tapes from remaining list
-                                found_tape_arns = {tape['TapeARN'] for tape in detailed_tapes}
-                                remaining_tape_arns -= found_tape_arns
-                                
-                                logger.info(f"Found {len(detailed_tapes)} tapes in gateway {gateway_name}")
+                                try:
+                                    logger.info(f"  Querying batch of {len(batch_arns)} tapes from gateway {gateway_name}")
+                                    
+                                    response = self.storagegateway.describe_tapes(
+                                        GatewayARN=current_gateway_arn,
+                                        TapeARNs=batch_arns
+                                    )
+                                    
+                                    detailed_tapes = response.get('Tapes', [])
+                                    if detailed_tapes:
+                                        all_detailed_tapes.extend(detailed_tapes)
+                                        
+                                        # Remove found tapes from remaining list
+                                        found_tape_arns = {tape['TapeARN'] for tape in detailed_tapes}
+                                        remaining_tape_arns -= found_tape_arns
+                                        
+                                        logger.info(f"  Found {len(detailed_tapes)} tapes in this batch from gateway {gateway_name}")
+                                    else:
+                                        logger.debug(f"  No tapes found in this batch from gateway {gateway_name}")
+                                        
+                                except Exception as batch_e:
+                                    # Log batch-specific errors
+                                    error_msg = str(batch_e)
+                                    if "InvalidGatewayRequestException" in error_msg:
+                                        logger.debug(f"  Gateway {gateway_name} doesn't have tapes in this batch: {batch_e}")
+                                    elif "does not exist" in error_msg or "not found" in error_msg:
+                                        logger.debug(f"  Gateway {gateway_name} not found or unavailable: {batch_e}")
+                                    else:
+                                        logger.warning(f"  Unexpected error querying batch from gateway {gateway_name}: {batch_e}")
+                                    continue
+                            
+                            if all_detailed_tapes:
+                                logger.info(f"Total found so far from gateway {gateway_name}: {len([t for t in all_detailed_tapes if any(gw.get('GatewayARN') == current_gateway_arn for gw in gateways)])}")
                             
                         except Exception as e:
                             # This is expected if the gateway doesn't have these tapes
-                            logger.debug(f"Gateway {gateway_name} doesn't have the requested tapes: {e}")
+                            # But let's log more details to understand what's happening
+                            error_msg = str(e)
+                            if "InvalidGatewayRequestException" in error_msg:
+                                logger.debug(f"Gateway {gateway_name} doesn't have the requested tapes: {e}")
+                            elif "does not exist" in error_msg or "not found" in error_msg:
+                                logger.debug(f"Gateway {gateway_name} not found or unavailable: {e}")
+                            else:
+                                # This might be a more serious error we should know about
+                                logger.warning(f"Unexpected error querying gateway {gateway_name}: {e}")
                             continue
                     
                     if remaining_tape_arns:
-                        logger.warning(f"Could not find details for {len(remaining_tape_arns)} tapes: {list(remaining_tape_arns)}")
+                        logger.warning(f"Could not find details for {len(remaining_tape_arns)} tapes")
+                        # Log a few examples of tapes that weren't found
+                        sample_missing = list(remaining_tape_arns)[:3]
+                        logger.warning(f"Sample missing tapes: {sample_missing}")
+                    
+                    logger.info(f"Gateway discovery summary:")
+                    logger.info(f"  - Total gateways checked: {len(gateways)}")
+                    logger.info(f"  - Total tapes requested: {len(tape_arns)}")
+                    logger.info(f"  - Total tapes found: {len(all_detailed_tapes)}")
+                    logger.info(f"  - Tapes not found: {len(remaining_tape_arns)}")
                         
                 except Exception as e:
                     logger.error(f"Failed to discover gateways: {e}")
@@ -398,7 +452,9 @@ class VirtualTapeManager:
             # Step 2: Get detailed information for all tapes
             logger.info("Retrieving detailed tape information...")
             tape_arns = [tape['TapeARN'] for tape in tapes]
-            detailed_tapes = self.get_tape_details(tape_arns)
+            logger.info(f"Requesting details for {len(tape_arns)} tapes")
+            detailed_tapes = self.get_tape_details(tape_arns, gateway_arn)
+            logger.info(f"Received details for {len(detailed_tapes)} tapes")
 
             # Step 3: Process and categorize tape information
             for tape in detailed_tapes:
@@ -838,26 +894,33 @@ Examples:
         results = tape_manager.list_all_tapes_detailed(args.gateway_arn)
         
         # Save tape list to file if requested
-        if args.output_file and results['tape_details']:
+        if args.output_file:
             try:
                 with open(args.output_file, 'w') as f:
                     f.write("# Virtual Tape List\n")
                     f.write(f"# Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                     f.write(f"# Region: {args.region}\n")
                     f.write(f"# Gateway: {args.gateway_arn or 'all gateways'}\n")
-                    f.write(f"# Total tapes: {len(results['tape_details'])}\n")
+                    f.write(f"# Total tapes: {len(results.get('tape_details', []))}\n")
                     f.write("#\n")
                     f.write("# Format: One tape barcode per line\n")
                     f.write("# Use this file with --delete-specific --tape-file\n")
                     f.write("#\n\n")
                     
                     # Write tape barcodes, one per line
-                    for tape in results['tape_details']:
-                        f.write(f"{tape['barcode']}\n")
+                    if results.get('tape_details'):
+                        for tape in results['tape_details']:
+                            f.write(f"{tape['barcode']}\n")
+                    else:
+                        f.write("# No tapes found\n")
                 
                 logger.info(f"Tape list saved to: {args.output_file}")
                 print(f"\nTape list saved to: {args.output_file}")
-                print(f"Use with: python3 {sys.argv[0]} --region {args.region} --delete-specific --tape-file {args.output_file}")
+                
+                if results.get('tape_details'):
+                    print(f"Use with: python3 {sys.argv[0]} --region {args.region} --delete-specific --tape-file {args.output_file}")
+                else:
+                    print("File created but contains no tapes (none were found)")
                 
             except Exception as e:
                 logger.error(f"Failed to save tape list to file: {e}")
