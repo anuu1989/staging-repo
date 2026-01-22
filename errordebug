@@ -1,2 +1,16 @@
-2026-01-22 14:48:34,979 - ERROR - Failed to list tapes for gateway APDINBVTL04: Parameter validation failed:
-Unknown parameter in input: "GatewayARN", must be one of: TapeARNs, Marker, Limit
+2026-01-22 15:46:46,669 - INFO - Retrieving virtual tapes from Storage Gateway...
+2026-01-22 15:46:46,764 - INFO - Found 2943 virtual tapes across all gateways
+2026-01-22 15:46:46,765 - INFO - Retrieving detailed tape information...
+2026-01-22 15:46:46,767 - ERROR - Failed to get tape details: Parameter validation failed:
+Missing required parameter in input: "GatewayARN"
+2026-01-22 15:46:46,767 - INFO - Successfully processed 0 tapes
+
+============================================================
+VIRTUAL TAPE INVENTORY
+============================================================
+Total tapes found: 2943
+Total allocated size: 0 bytes (0.00 GB)
+Total used size: 0 bytes (0.00 GB)
+2026-01-22 15:46:46,768 - INFO - Virtual Tape Cleanup Process Completed
+
+[INFO] Virtual tape inventory completed successfully
