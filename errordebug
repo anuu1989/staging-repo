@@ -1,0 +1,2 @@
+2026-01-22 14:48:34,979 - ERROR - Failed to list tapes for gateway APDINBVTL04: Parameter validation failed:
+Unknown parameter in input: "GatewayARN", must be one of: TapeARNs, Marker, Limit
