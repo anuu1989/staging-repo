@@ -39,7 +39,6 @@ Your AWS credentials need the following permissions:
         {
             "Effect": "Allow",
             "Action": [
-                "storagegateway:ListGateways",
                 "storagegateway:ListTapes",
                 "storagegateway:DescribeTapes",
                 "storagegateway:DeleteTape"
@@ -275,21 +274,20 @@ Tapes not found:
 
 1. **Permission Denied**: Ensure your AWS credentials have the required Storage Gateway permissions
 2. **Region Not Found**: Verify the region name is correct and Storage Gateway exists in that region
-3. **No Storage Gateways Found**: The script requires at least one Storage Gateway to exist in the specified region
+3. **No Virtual Tapes Found**: The region may not contain any virtual tapes or Storage Gateways
 4. **Tape Not Deletable**: Some tapes may be in use or have retention policies preventing deletion
 5. **File Not Found**: When using `--tape-file`, ensure the file path is correct and accessible
 6. **Invalid Tape Identifier**: Verify tape barcodes/ARNs are correct and exist in the system
-7. **GatewayARN Parameter Error**: This usually means no Storage Gateways exist in the region or insufficient permissions
+7. **API Parameter Errors**: Ensure you're using the correct AWS region and have proper permissions
 
 ### Debug Steps
 
 1. **Start with Inventory**: Always run `--list-all` first to understand your tape landscape
-2. **Check for Storage Gateways**: Ensure at least one Storage Gateway exists in your target region
-3. **Use Dry-Run**: Test operations with dry-run mode before actual execution
-4. **Check Logs**: Review detailed logs for specific error messages
-5. **Verify Permissions**: Ensure IAM permissions include all required Storage Gateway actions (ListGateways, ListTapes, DescribeTapes, DeleteTape)
-6. **Test Connectivity**: Verify AWS CLI access and region connectivity
-7. **Validate Region**: Confirm the region contains Storage Gateway resources
+2. **Use Dry-Run**: Test operations with dry-run mode before actual execution
+3. **Check Logs**: Review detailed logs for specific error messages
+4. **Verify Permissions**: Ensure IAM permissions include all required Storage Gateway actions (ListTapes, DescribeTapes, DeleteTape)
+5. **Test Connectivity**: Verify AWS CLI access and region connectivity
+6. **Validate Region**: Confirm the region contains Storage Gateway resources with virtual tapes
 
 ## Important Notes
 

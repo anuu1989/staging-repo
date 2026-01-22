@@ -73,12 +73,12 @@ class VirtualTapeManager:
         Retrieve a list of all virtual tapes from Storage Gateway
         
         This method calls the AWS Storage Gateway API to get basic information
-        about all virtual tapes. The response includes tape ARNs, barcodes,
-        and basic metadata but not detailed information.
+        about all virtual tapes. The list_tapes API returns all tapes across
+        all gateways in the region, so we filter by gateway if specified.
         
         Args:
             gateway_arn (str, optional): Specific Storage Gateway ARN to query.
-                                       If None, queries all gateways in the region
+                                       If None, returns all tapes in the region
         
         Returns:
             List[Dict]: List of tape information dictionaries containing:
@@ -93,57 +93,58 @@ class VirtualTapeManager:
         """
         try:
             all_tapes = []
+            marker = None
+            
+            # The list_tapes API returns all tapes across all gateways in the region
+            # We'll paginate through all results and filter by gateway if needed
+            while True:
+                logger.info("Retrieving virtual tapes from Storage Gateway...")
+                
+                # Build API call parameters
+                params = {'Limit': 100}
+                if marker:
+                    params['Marker'] = marker
+                
+                # Call AWS API to list tapes
+                response = self.storagegateway.list_tapes(**params)
+                
+                # Extract tape information from API response
+                tapes = response.get('TapeInfos', [])
+                
+                # Filter by gateway if specified
+                if gateway_arn:
+                    # We need to get detailed info to check which gateway owns each tape
+                    if tapes:
+                        tape_arns = [tape['TapeARN'] for tape in tapes]
+                        detailed_tapes = self.get_tape_details(tape_arns)
+                        
+                        # Filter tapes that belong to the specified gateway
+                        filtered_tapes = []
+                        for detailed_tape in detailed_tapes:
+                            if detailed_tape.get('GatewayARN') == gateway_arn:
+                                # Find the corresponding basic tape info
+                                for basic_tape in tapes:
+                                    if basic_tape['TapeARN'] == detailed_tape['TapeARN']:
+                                        filtered_tapes.append(basic_tape)
+                                        break
+                        
+                        all_tapes.extend(filtered_tapes)
+                else:
+                    # No filtering needed, add all tapes
+                    all_tapes.extend(tapes)
+                
+                # Check if there are more results to fetch
+                marker = response.get('Marker')
+                if not marker:
+                    break
+                    
+                logger.info(f"Retrieved {len(tapes)} tapes, continuing pagination...")
             
             if gateway_arn:
-                # Query specific gateway if ARN provided
-                logger.info(f"Listing tapes for specific gateway: {gateway_arn}")
-                try:
-                    response = self.storagegateway.list_tapes(
-                        GatewayARN=gateway_arn,
-                        Limit=100
-                    )
-                    tapes = response.get('TapeInfos', [])
-                    all_tapes.extend(tapes)
-                except Exception as e:
-                    logger.error(f"Failed to list tapes for gateway {gateway_arn}: {e}")
+                logger.info(f"Found {len(all_tapes)} virtual tapes for gateway {gateway_arn}")
             else:
-                # Query all gateways in the region
-                logger.info("Listing all Storage Gateways in the region...")
-                try:
-                    # First, get all gateways in the region
-                    gateways_response = self.storagegateway.list_gateways(Limit=100)
-                    gateways = gateways_response.get('Gateways', [])
-                    
-                    if not gateways:
-                        logger.warning("No Storage Gateways found in the region")
-                        return []
-                    
-                    logger.info(f"Found {len(gateways)} Storage Gateway(s)")
-                    
-                    # Query tapes for each gateway
-                    for gateway in gateways:
-                        gateway_arn_current = gateway.get('GatewayARN')
-                        gateway_name = gateway.get('GatewayName', 'Unknown')
-                        
-                        if gateway_arn_current:
-                            logger.info(f"Listing tapes for gateway: {gateway_name} ({gateway_arn_current})")
-                            try:
-                                response = self.storagegateway.list_tapes(
-                                    GatewayARN=gateway_arn_current,
-                                    Limit=100
-                                )
-                                tapes = response.get('TapeInfos', [])
-                                all_tapes.extend(tapes)
-                                logger.info(f"Found {len(tapes)} tapes in gateway {gateway_name}")
-                            except Exception as e:
-                                logger.error(f"Failed to list tapes for gateway {gateway_name}: {e}")
-                                continue
-                                
-                except Exception as e:
-                    logger.error(f"Failed to list gateways: {e}")
-                    return []
+                logger.info(f"Found {len(all_tapes)} virtual tapes across all gateways")
             
-            logger.info(f"Total virtual tapes found: {len(all_tapes)}")
             return all_tapes
             
         except Exception as e:

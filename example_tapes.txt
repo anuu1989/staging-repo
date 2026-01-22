@@ -1,0 +1,18 @@
+# Example tape list file
+# Lines starting with # are comments and will be ignored
+# You can specify either tape barcodes or full ARNs
+
+# Example tape barcodes
+VTL001
+VTL002
+VTL003
+
+# Example full ARN (replace with actual values)
+# arn:aws:storagegateway:us-east-1:123456789012:tape/sgw-12345678/VTL004
+
+# Another tape barcode
+TAPE005
+
+# Empty lines are ignored
+
+VTL006
