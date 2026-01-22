@@ -39,6 +39,7 @@ Your AWS credentials need the following permissions:
         {
             "Effect": "Allow",
             "Action": [
+                "storagegateway:ListGateways",
                 "storagegateway:ListTapes",
                 "storagegateway:DescribeTapes",
                 "storagegateway:DeleteTape"
@@ -352,13 +353,17 @@ Tapes not found:
 
 ### API Requirements Note
 
-The AWS Storage Gateway APIs (`list_tapes` and `describe_tapes`) require `GatewayARN` parameters. This script automatically:
-- Extracts gateway information from tape ARNs
-- Groups tapes by their parent gateway
-- Makes separate API calls for each gateway
-- Handles ARN parsing errors gracefully
+The AWS Storage Gateway APIs have specific requirements:
+- `list_tapes` API lists all tapes across all gateways in a region
+- `describe_tapes` API requires a `GatewayARN` parameter to get detailed information
 
-This ensures compatibility with AWS API requirements while providing a seamless user experience.
+This script automatically handles these requirements by:
+1. **Gateway Discovery**: Lists all Storage Gateways in the region
+2. **Smart Tape Lookup**: Tries each gateway to find the requested tapes
+3. **Efficient Processing**: Only queries gateways that contain the tapes
+4. **Error Resilience**: Continues processing even if some gateways are unavailable
+
+This approach ensures compatibility with AWS API requirements while providing a seamless user experience, regardless of how tapes are distributed across gateways.
 
 ### Debug Steps
 

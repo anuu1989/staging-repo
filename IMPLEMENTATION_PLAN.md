@@ -43,6 +43,7 @@
         {
             "Effect": "Allow",
             "Action": [
+                "storagegateway:ListGateways",
                 "storagegateway:ListTapes",
                 "storagegateway:DescribeTapes",
                 "storagegateway:DeleteTape"
@@ -713,21 +714,28 @@ BACKUP_RETENTION_DAYS=365
 
 #### AWS Storage Gateway API Requirements
 **Issue**: Parameter validation errors with Storage Gateway APIs
-- **Root Cause**: Both `list_tapes` and `describe_tapes` APIs require `GatewayARN` parameters
+- **Root Cause**: The `describe_tapes` API requires `GatewayARN` parameters, but tape ARNs don't reliably contain gateway information
 - **Solution Implemented**: 
-  - Enhanced ARN parsing to extract gateway information from tape ARNs
-  - Implemented gateway grouping for efficient API calls
-  - Added robust error handling for malformed ARNs
+  - Gateway discovery approach: List all gateways in the region
+  - Try each gateway to find the requested tapes
+  - Robust error handling for gateways that don't contain the tapes
+  - Efficient tape discovery across multiple gateways
 
-**Code Example**:
+**Updated Approach**:
 ```python
-# Extract gateway ARN from tape ARN
-# arn:aws:storagegateway:region:account:tape/gateway-id/tape-id
-# becomes: arn:aws:storagegateway:region:account:gateway/gateway-id
-arn_parts = tape_arn.split(':')
-resource_part = arn_parts[5]  # tape/gateway-id/tape-id
-gateway_id = resource_part.split('/')[1]
-gateway_arn = f"{':'.join(arn_parts[:5])}:gateway/{gateway_id}"
+# Instead of parsing tape ARNs (unreliable), discover gateways
+gateways = storagegateway.list_gateways()
+for gateway in gateways:
+    try:
+        # Try to get tape details from this gateway
+        response = storagegateway.describe_tapes(
+            GatewayARN=gateway['GatewayARN'], 
+            TapeARNs=requested_tape_arns
+        )
+        # Process found tapes and remove from remaining list
+    except Exception:
+        # Gateway doesn't have these tapes, try next gateway
+        continue
 ```
 
 #### aws-azure-login Integration

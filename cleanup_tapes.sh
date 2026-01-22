@@ -194,6 +194,7 @@ PREREQUISITES:
     • IAM permissions for Storage Gateway operations
 
 REQUIRED IAM PERMISSIONS:
+    • storagegateway:ListGateways
     • storagegateway:ListTapes
     • storagegateway:DescribeTapes  
     • storagegateway:DeleteTape

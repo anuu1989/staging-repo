@@ -152,7 +152,7 @@ class VirtualTapeManager:
             logger.error(f"Failed to list virtual tapes: {e}")
             return []
 
-    def get_tape_details(self, tape_arns: List[str]) -> List[Dict]:
+    def get_tape_details(self, tape_arns: List[str], gateway_arn: str = None) -> List[Dict]:
         """
         Get detailed information about specific virtual tapes
         
@@ -162,6 +162,7 @@ class VirtualTapeManager:
         
         Args:
             tape_arns (List[str]): List of tape ARNs to get details for
+            gateway_arn (str, optional): Specific gateway ARN if known
         
         Returns:
             List[Dict]: Detailed tape information including:
@@ -174,9 +175,9 @@ class VirtualTapeManager:
                        - Progress: Completion percentage for operations
         
         Note:
-            This API call is more expensive than list_tapes as it returns
-            detailed information. The describe_tapes API requires a GatewayARN,
-            so we extract it from the tape ARNs and group by gateway.
+            Since describe_tapes requires a GatewayARN and we can't reliably parse
+            it from tape ARNs, we'll discover gateways and try each one until we
+            find the tapes we're looking for.
         """
         if not tape_arns:
             return []
@@ -184,55 +185,77 @@ class VirtualTapeManager:
         try:
             all_detailed_tapes = []
             
-            # Group tape ARNs by gateway
-            # Tape ARN format: arn:aws:storagegateway:region:account:tape/gateway-id/tape-id
-            # Gateway ARN format: arn:aws:storagegateway:region:account:gateway/gateway-id
-            tapes_by_gateway = {}
-            
-            for tape_arn in tape_arns:
+            if gateway_arn:
+                # If we have a specific gateway ARN, use it directly
                 try:
-                    # Extract gateway ARN from tape ARN
-                    # Split the ARN and reconstruct the gateway ARN
-                    arn_parts = tape_arn.split(':')
-                    if len(arn_parts) >= 6:
-                        # arn:aws:storagegateway:region:account:tape/gateway-id/tape-id
-                        resource_part = arn_parts[5]  # tape/gateway-id/tape-id
-                        resource_parts = resource_part.split('/')
-                        if len(resource_parts) >= 2:
-                            gateway_id = resource_parts[1]
-                            # Reconstruct gateway ARN
-                            gateway_arn = f"{':'.join(arn_parts[:5])}:gateway/{gateway_id}"
-                            
-                            if gateway_arn not in tapes_by_gateway:
-                                tapes_by_gateway[gateway_arn] = []
-                            tapes_by_gateway[gateway_arn].append(tape_arn)
-                        else:
-                            logger.warning(f"Invalid tape ARN format: {tape_arn}")
-                    else:
-                        logger.warning(f"Invalid ARN format: {tape_arn}")
-                except Exception as e:
-                    logger.warning(f"Failed to parse tape ARN {tape_arn}: {e}")
-                    continue
-            
-            # Call describe_tapes for each gateway
-            for gateway_arn, gateway_tape_arns in tapes_by_gateway.items():
-                try:
-                    logger.info(f"Getting details for {len(gateway_tape_arns)} tapes from gateway {gateway_arn}")
-                    
-                    # Call AWS API to get detailed tape information for this gateway
+                    logger.info(f"Getting details for {len(tape_arns)} tapes from specified gateway {gateway_arn}")
                     response = self.storagegateway.describe_tapes(
                         GatewayARN=gateway_arn,
-                        TapeARNs=gateway_tape_arns
+                        TapeARNs=tape_arns
                     )
-                    
                     detailed_tapes = response.get('Tapes', [])
                     all_detailed_tapes.extend(detailed_tapes)
-                    
-                    logger.info(f"Retrieved details for {len(detailed_tapes)} tapes from gateway {gateway_arn}")
-                    
+                    logger.info(f"Retrieved details for {len(detailed_tapes)} tapes")
                 except Exception as e:
                     logger.error(f"Failed to get tape details for gateway {gateway_arn}: {e}")
-                    continue
+            else:
+                # We need to discover gateways and try each one
+                logger.info("Discovering Storage Gateways to find tape details...")
+                
+                try:
+                    # Get all gateways in the region
+                    gateways_response = self.storagegateway.list_gateways(Limit=100)
+                    gateways = gateways_response.get('Gateways', [])
+                    
+                    if not gateways:
+                        logger.warning("No Storage Gateways found in the region")
+                        return []
+                    
+                    logger.info(f"Found {len(gateways)} Storage Gateway(s), checking each for requested tapes")
+                    
+                    # Try each gateway to find our tapes
+                    remaining_tape_arns = set(tape_arns)
+                    
+                    for gateway in gateways:
+                        if not remaining_tape_arns:
+                            break  # Found all tapes
+                            
+                        current_gateway_arn = gateway.get('GatewayARN')
+                        gateway_name = gateway.get('GatewayName', 'Unknown')
+                        
+                        if not current_gateway_arn:
+                            continue
+                            
+                        try:
+                            logger.info(f"Checking gateway: {gateway_name} ({current_gateway_arn})")
+                            
+                            # Try to get details for remaining tapes from this gateway
+                            response = self.storagegateway.describe_tapes(
+                                GatewayARN=current_gateway_arn,
+                                TapeARNs=list(remaining_tape_arns)
+                            )
+                            
+                            detailed_tapes = response.get('Tapes', [])
+                            if detailed_tapes:
+                                all_detailed_tapes.extend(detailed_tapes)
+                                
+                                # Remove found tapes from remaining list
+                                found_tape_arns = {tape['TapeARN'] for tape in detailed_tapes}
+                                remaining_tape_arns -= found_tape_arns
+                                
+                                logger.info(f"Found {len(detailed_tapes)} tapes in gateway {gateway_name}")
+                            
+                        except Exception as e:
+                            # This is expected if the gateway doesn't have these tapes
+                            logger.debug(f"Gateway {gateway_name} doesn't have the requested tapes: {e}")
+                            continue
+                    
+                    if remaining_tape_arns:
+                        logger.warning(f"Could not find details for {len(remaining_tape_arns)} tapes: {list(remaining_tape_arns)}")
+                        
+                except Exception as e:
+                    logger.error(f"Failed to discover gateways: {e}")
+                    return []
             
             logger.info(f"Successfully retrieved details for {len(all_detailed_tapes)} total tapes")
             return all_detailed_tapes
@@ -490,7 +513,7 @@ class VirtualTapeManager:
             # This is necessary because list_tapes doesn't include creation dates
             logger.info("Retrieving detailed tape information...")
             tape_arns = [tape['TapeARN'] for tape in tapes]
-            detailed_tapes = self.get_tape_details(tape_arns)
+            detailed_tapes = self.get_tape_details(tape_arns, gateway_arn)
 
             # Step 3: Analyze each tape to identify expired ones
             logger.info(f"Analyzing tapes for expiry (threshold: {expiry_days} days)...")
