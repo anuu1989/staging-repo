@@ -1,1 +1,12 @@
-2026-01-22 16:19:29,550 - ERROR - Failed to get tape details for gateway arn:aws:storagegateway:ap-southeast-2:039331822418:gateway/AP11D6B7: An error occurred (InvalidGatewayRequestException) when calling the DescribeTapes operation: The specified gateway was not found.
+2026-01-22 16:29:15,572 - INFO - Successfully retrieved details for 0 total tapes
+2026-01-22 16:29:15,572 - INFO - Successfully processed 0 tapes
+
+============================================================
+VIRTUAL TAPE INVENTORY
+============================================================
+Total tapes found: 2943
+Total allocated size: 0 bytes (0.00 GB)
+Total used size: 0 bytes (0.00 GB)
+2026-01-22 16:29:15,573 - INFO - Virtual Tape Cleanup Process Completed
+
+[INFO] Virtual tape inventory completed successfully
