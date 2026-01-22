@@ -47,6 +47,9 @@ DELETE_SPECIFIC=false       # Delete specific tapes mode
 TAPE_LIST=""                # Comma-separated list of tapes
 TAPE_FILE=""                # File containing tape list
 
+# Output options
+OUTPUT_FILE=""              # File to save tape list (for list-all mode)
+
 #==============================================================================
 # COLOR DEFINITIONS FOR OUTPUT FORMATTING
 #==============================================================================
@@ -137,6 +140,10 @@ TAPE SPECIFICATION OPTIONS (for --delete-specific):
                                
     --tape-file FILE            File containing tape ARNs or barcodes (one per line)
                                Lines starting with # are treated as comments
+
+OUTPUT OPTIONS (for --list-all):
+    --output-file FILE          Save tape list to file (one barcode per line)
+                               Can be used later with --delete-specific --tape-file
                                
     -h, --help                  Show this help message and exit
 
@@ -151,6 +158,9 @@ EXAMPLES:
     # List all virtual tapes (inventory mode)
     $0 --region us-east-1 --list-all
 
+    # List all tapes and save to file for later use
+    $0 --region us-east-1 --list-all --output-file all_tapes.txt
+
     # Safe dry-run to preview what expired tapes would be deleted (default mode)
     $0 --region us-east-1 --expiry-days 60
 
@@ -162,6 +172,11 @@ EXAMPLES:
 
     # Delete specific tapes from file (actual deletion)
     $0 --region us-east-1 --delete-specific --tape-file tapes_to_delete.txt --execute
+
+    # Workflow: List all tapes, then delete specific ones
+    $0 --region us-east-1 --list-all --output-file all_tapes.txt
+    # Edit all_tapes.txt to keep only tapes you want to delete
+    $0 --region us-east-1 --delete-specific --tape-file all_tapes.txt --execute
 
     # Use specific AWS profile for multi-account environments
     $0 --region us-west-2 --profile production --expiry-days 90 --execute
@@ -258,6 +273,11 @@ while [[ $# -gt 0 ]]; do
             TAPE_FILE="$2"
             shift 2
             ;;
+        --output-file)
+            # File to save tape list (for list-all mode)
+            OUTPUT_FILE="$2"
+            shift 2
+            ;;
         -h|--help)
             # Display help information and exit
             show_usage
@@ -307,6 +327,14 @@ fi
 # Validate that tape list/file options are only used with delete-specific mode
 if [[ -n "$TAPE_LIST" || -n "$TAPE_FILE" ]] && [[ "$DELETE_SPECIFIC" != "true" ]]; then
     print_error "--tape-list and --tape-file can only be used with --delete-specific"
+    echo ""
+    show_usage
+    exit 1
+fi
+
+# Validate that output file is only used with list-all mode
+if [[ -n "$OUTPUT_FILE" && "$LIST_ALL" != "true" ]]; then
+    print_error "--output-file can only be used with --list-all"
     echo ""
     show_usage
     exit 1
@@ -380,6 +408,12 @@ CMD="python3 delete_expired_virtual_tapes.py --region $REGION"
 if [[ "$LIST_ALL" == "true" ]]; then
     CMD="$CMD --list-all"
     print_info "Operation mode: List all tapes (inventory)"
+    
+    # Add output file if specified
+    if [[ -n "$OUTPUT_FILE" ]]; then
+        CMD="$CMD --output-file \"$OUTPUT_FILE\""
+        print_info "Output file: $OUTPUT_FILE"
+    fi
 elif [[ "$DELETE_SPECIFIC" == "true" ]]; then
     CMD="$CMD --delete-specific"
     print_info "Operation mode: Delete specific tapes"
@@ -440,6 +474,9 @@ print_info "Profile: ${PROFILE:-default}"
 
 if [[ "$LIST_ALL" == "true" ]]; then
     print_info "Operation: List all virtual tapes"
+    if [[ -n "$OUTPUT_FILE" ]]; then
+        print_info "Output file: $OUTPUT_FILE"
+    fi
 elif [[ "$DELETE_SPECIFIC" == "true" ]]; then
     print_info "Operation: Delete specific tapes"
     if [[ -n "$TAPE_LIST" ]]; then

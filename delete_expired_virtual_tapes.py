@@ -677,6 +677,10 @@ Examples:
     parser.add_argument('--tape-file', 
                        help='File containing list of tape ARNs or barcodes (one per line, use with --delete-specific)')
     
+    # Output options
+    parser.add_argument('--output-file', 
+                       help='Save tape list to file (use with --list-all). File will contain tape barcodes, one per line')
+    
     # Parse command-line arguments
     args = parser.parse_args()
 
@@ -688,6 +692,11 @@ Examples:
     if (args.tape_list or args.tape_file) and not args.delete_specific:
         logger.error("--tape-list and --tape-file can only be used with --delete-specific")
         sys.exit(1)
+    
+    # Validate output file option
+    if args.output_file and not args.list_all:
+        logger.error("--output-file can only be used with --list-all")
+        sys.exit(1)
 
     # Determine execution mode: dry-run is default unless --execute is specified
     # This provides an extra safety layer to prevent accidental deletions
@@ -696,6 +705,8 @@ Examples:
     # Determine operation mode
     if args.list_all:
         operation_mode = "list_all"
+        if args.output_file:
+            logger.info(f"Output file: {args.output_file}")
     elif args.delete_specific:
         operation_mode = "delete_specific"
     else:
@@ -747,6 +758,32 @@ Examples:
     if operation_mode == "list_all":
         # List all tapes mode
         results = tape_manager.list_all_tapes_detailed(args.gateway_arn)
+        
+        # Save tape list to file if requested
+        if args.output_file and results['tape_details']:
+            try:
+                with open(args.output_file, 'w') as f:
+                    f.write("# Virtual Tape List\n")
+                    f.write(f"# Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"# Region: {args.region}\n")
+                    f.write(f"# Gateway: {args.gateway_arn or 'all gateways'}\n")
+                    f.write(f"# Total tapes: {len(results['tape_details'])}\n")
+                    f.write("#\n")
+                    f.write("# Format: One tape barcode per line\n")
+                    f.write("# Use this file with --delete-specific --tape-file\n")
+                    f.write("#\n\n")
+                    
+                    # Write tape barcodes, one per line
+                    for tape in results['tape_details']:
+                        f.write(f"{tape['barcode']}\n")
+                
+                logger.info(f"Tape list saved to: {args.output_file}")
+                print(f"\nTape list saved to: {args.output_file}")
+                print(f"Use with: python3 {sys.argv[0]} --region {args.region} --delete-specific --tape-file {args.output_file}")
+                
+            except Exception as e:
+                logger.error(f"Failed to save tape list to file: {e}")
+                print(f"Error: Failed to save tape list to {args.output_file}: {e}")
         
         # Display comprehensive tape inventory
         print("\n" + "="*60)

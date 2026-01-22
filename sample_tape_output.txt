@@ -1,0 +1,18 @@
+# Virtual Tape List
+# Generated on: 2024-01-22 15:30:45
+# Region: us-east-1
+# Gateway: all gateways
+# Total tapes: 8
+#
+# Format: One tape barcode per line
+# Use this file with --delete-specific --tape-file
+#
+
+VTL001
+VTL002
+VTL003
+TAPE004
+VTL005
+BACKUP006
+VTL007
+ARCHIVE008

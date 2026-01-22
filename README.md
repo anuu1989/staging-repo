@@ -67,11 +67,14 @@ Your AWS credentials need the following permissions:
 # Get comprehensive inventory of all virtual tapes
 ./cleanup_tapes.sh --region us-east-1 --list-all
 
+# List tapes and save to file for later use
+./cleanup_tapes.sh --region us-east-1 --list-all --output-file all_tapes.txt
+
 # List tapes for specific AWS profile
-./cleanup_tapes.sh --region us-west-2 --profile production --list-all
+./cleanup_tapes.sh --region us-west-2 --profile production --list-all --output-file prod_tapes.txt
 
 # List tapes for specific Storage Gateway
-./cleanup_tapes.sh --region us-east-1 --gateway-arn arn:aws:storagegateway:us-east-1:123456789012:gateway/sgw-12345678 --list-all
+./cleanup_tapes.sh --region us-east-1 --gateway-arn arn:aws:storagegateway:us-east-1:123456789012:gateway/sgw-12345678 --list-all --output-file gateway_tapes.txt
 ```
 
 #### 2. Delete Expired Tapes (Age-Based Cleanup)
@@ -100,7 +103,20 @@ Your AWS credentials need the following permissions:
 ./cleanup_tapes.sh --region us-east-1 --delete-specific --tape-file tapes_to_delete.txt --execute
 ```
 
-#### 4. Advanced Options
+#### 4. Workflow: List Then Delete
+
+```bash
+# Step 1: List all tapes and save to file
+./cleanup_tapes.sh --region us-east-1 --list-all --output-file all_tapes.txt
+
+# Step 2: Edit the file to keep only tapes you want to delete
+# (Remove lines for tapes you want to keep)
+
+# Step 3: Delete the selected tapes
+./cleanup_tapes.sh --region us-east-1 --delete-specific --tape-file all_tapes.txt --execute
+```
+
+#### 5. Advanced Options
 
 ```bash
 # Target specific Storage Gateway
@@ -114,7 +130,11 @@ Your AWS credentials need the following permissions:
 
 #### List All Tapes
 ```bash
+# Basic inventory
 python3 delete_expired_virtual_tapes.py --region us-east-1 --list-all
+
+# Save tape list to file
+python3 delete_expired_virtual_tapes.py --region us-east-1 --list-all --output-file tapes.txt
 ```
 
 #### Delete Expired Tapes
@@ -164,9 +184,41 @@ python3 delete_expired_virtual_tapes.py --region us-east-1 --delete-specific --t
 | `--tape-list` | Comma-separated list of tape ARNs or barcodes | One of tape-list or tape-file |
 | `--tape-file` | File containing list of tape ARNs or barcodes (one per line) | One of tape-list or tape-file |
 
-## Tape List File Format
+### Output Options
+| Option | Description | Used with |
+|--------|-------------|-----------|
+| `--output-file` | Save tape list to file (one barcode per line) | `--list-all` |
 
-When using `--tape-file`, create a text file with one tape identifier per line:
+## Generated Tape List File Format
+
+When using `--output-file` with `--list-all`, the generated file contains:
+
+```
+# Virtual Tape List
+# Generated on: 2024-01-22 15:30:45
+# Region: us-east-1
+# Gateway: all gateways
+# Total tapes: 25
+#
+# Format: One tape barcode per line
+# Use this file with --delete-specific --tape-file
+#
+
+VTL001
+VTL002
+VTL003
+TAPE004
+VTL005
+```
+
+This file can be:
+- **Edited** to remove tapes you want to keep
+- **Used directly** with `--delete-specific --tape-file`
+- **Shared** for review and approval processes
+
+## Manual Tape List File Format
+
+When manually creating a tape list file for `--tape-file`, use this format:
 
 ```
 # This is a comment - lines starting with # are ignored
@@ -257,16 +309,34 @@ Tapes not found:
 - **Inventory Audits**: Use `--list-all` to generate comprehensive tape inventories
 - **Automated Cleanup**: Schedule expired tape deletion with `--delete-expired`
 - **Compliance Reporting**: Generate reports showing tape usage and retention
+- **Tape List Generation**: Save tape lists to files for approval workflows
 
 ### 2. Targeted Operations
 - **Emergency Cleanup**: Remove specific problematic tapes with `--delete-specific`
 - **Migration Support**: Clean up tapes during Storage Gateway migrations
 - **Cost Optimization**: Remove unused or redundant tapes to reduce storage costs
+- **Selective Deletion**: Use generated tape lists to delete only approved tapes
 
 ### 3. Operational Workflows
 - **Pre-Migration**: List all tapes before system changes
 - **Post-Incident**: Clean up tapes after backup/restore operations
 - **Capacity Planning**: Analyze tape usage patterns and storage requirements
+- **Approval Process**: Generate tape lists for management review before deletion
+
+### 4. Common Workflow Pattern
+```bash
+# Step 1: Generate inventory and save to file
+./cleanup_tapes.sh --region us-east-1 --list-all --output-file inventory.txt
+
+# Step 2: Review and edit the file (remove tapes to keep)
+# Edit inventory.txt to contain only tapes you want to delete
+
+# Step 3: Test deletion with dry-run
+./cleanup_tapes.sh --region us-east-1 --delete-specific --tape-file inventory.txt
+
+# Step 4: Execute actual deletion
+./cleanup_tapes.sh --region us-east-1 --delete-specific --tape-file inventory.txt --execute
+```
 
 ## Troubleshooting
 
