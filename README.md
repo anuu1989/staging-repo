@@ -356,21 +356,47 @@ Tapes not found:
 4. **Tape Not Deletable**: Some tapes may be in use or have retention policies preventing deletion
 5. **File Not Found**: When using `--tape-file`, ensure the file path is correct and accessible
 6. **Invalid Tape Identifier**: Verify tape barcodes/ARNs are correct and exist in the system
-7. **API Parameter Errors**: The script automatically handles AWS API requirements for GatewayARN parameters
+7. **Archived Tapes Cannot Be Deleted**: Tapes with ARCHIVED status are in VTS and cannot be deleted directly
+8. **Limited Metadata for Archived Tapes**: Archived tapes have reduced information available (no creation dates)
+
+### Archived Tapes (VTS) Limitations
+
+**What are Archived Tapes?**
+- Tapes with status "ARCHIVED" are stored in AWS Virtual Tape Shelf (VTS)
+- These tapes are moved to long-term storage for cost optimization
+- Archived tapes cannot be accessed via regular Storage Gateway APIs
+
+**Script Behavior with Archived Tapes:**
+- **Inventory**: Shows archived tapes with available basic information
+- **Deletion**: Cannot delete archived tapes directly (they must be retrieved first)
+- **Metadata**: Limited information available (no creation dates, detailed status)
+
+**To Delete Archived Tapes:**
+1. Use AWS Console or CLI to retrieve tapes from VTS back to the gateway
+2. Wait for retrieval to complete (can take several hours)
+3. Once retrieved, tapes can be deleted using this script
 
 ### API Requirements Note
 
-The AWS Storage Gateway APIs have specific requirements:
-- `list_tapes` API lists all tapes across all gateways in a region
-- `describe_tapes` API requires a `GatewayARN` parameter to get detailed information
+The AWS Storage Gateway APIs have specific requirements and limitations:
 
-This script automatically handles these requirements by:
-1. **Gateway Discovery**: Lists all Storage Gateways in the region
-2. **Smart Tape Lookup**: Tries each gateway to find the requested tapes
-3. **Efficient Processing**: Only queries gateways that contain the tapes
-4. **Error Resilience**: Continues processing even if some gateways are unavailable
+**Regular vs Archived Tapes:**
+- `list_tapes` API lists all tapes (both active and archived) across all gateways in a region
+- `describe_tapes` API only works for **active tapes** and requires a `GatewayARN` parameter
+- **Archived tapes** (status: ARCHIVED) are stored in Virtual Tape Shelf (VTS) and cannot be queried via `describe_tapes`
 
-This approach ensures compatibility with AWS API requirements while providing a seamless user experience, regardless of how tapes are distributed across gateways.
+**How This Script Handles Different Tape States:**
+1. **Active Tapes**: Uses gateway discovery to find the correct gateway, then calls `describe_tapes`
+2. **Archived Tapes**: Uses basic information from `list_tapes` since detailed info is not available
+3. **Mixed Environments**: Automatically detects and handles both types appropriately
+
+**Important Notes for Archived Tapes:**
+- Archived tapes have limited metadata available (no creation dates, detailed status, etc.)
+- Archived tapes **cannot be deleted** via the regular Storage Gateway APIs
+- To delete archived tapes, they must first be retrieved from VTS back to the gateway
+- The script will identify archived tapes but cannot delete them directly
+
+This approach ensures compatibility with all tape states while providing the best available information for each type.
 
 ### Debug Steps
 

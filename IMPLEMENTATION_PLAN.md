@@ -102,6 +102,19 @@ aws storagegateway list-tapes --profile ap-prod --region ap-southeast-1 --limit 
 
 #### 3.1 Local Environment Setup
 
+**CRITICAL DISCOVERY: All tapes in ap-prod are ARCHIVED**
+Based on diagnostic results, all 2943 tapes in ap-prod are in ARCHIVED status (Virtual Tape Shelf). This significantly impacts the implementation approach:
+
+- **Archived tapes cannot be deleted directly** via Storage Gateway APIs
+- **Limited metadata available** for archived tapes (no creation dates for expiry calculations)
+- **Retrieval process required** before deletion (tapes must be moved from VTS back to gateway)
+- **Time and cost implications** (VTS retrieval can take hours and incurs additional charges)
+
+**Updated Implementation Strategy:**
+1. **Phase 1a**: Implement inventory and reporting for archived tapes
+2. **Phase 1b**: Develop retrieval workflow for tapes that need deletion
+3. **Phase 1c**: Implement deletion process for retrieved tapes
+
 **Day 1-2: Tool Installation and Configuration**
 
 1. **Install Required Tools**
@@ -713,29 +726,32 @@ BACKUP_RETENTION_DAYS=365
 ### Appendix D: Known Issues and Resolutions
 
 #### AWS Storage Gateway API Requirements
-**Issue**: Parameter validation errors with Storage Gateway APIs
-- **Root Cause**: The `describe_tapes` API requires `GatewayARN` parameters, but tape ARNs don't reliably contain gateway information
+**Issue**: Archived tapes cannot be accessed via regular Storage Gateway APIs
+- **Root Cause**: Tapes with "ARCHIVED" status are stored in Virtual Tape Shelf (VTS) and require different handling
+- **Discovery**: All 2943 tapes in ap-prod are ARCHIVED, which explains why `describe_tapes` returns 0 results
 - **Solution Implemented**: 
-  - Gateway discovery approach: List all gateways in the region
-  - Try each gateway to find the requested tapes
-  - Robust error handling for gateways that don't contain the tapes
-  - Efficient tape discovery across multiple gateways
+  - Detect tape status from `list_tapes` response
+  - Handle archived tapes using basic information only
+  - Separate processing for active vs archived tapes
+  - Clear messaging about archived tape limitations
+
+**Critical Implications for ap-prod:**
+- **Cannot delete archived tapes directly** - they must be retrieved from VTS first
+- **Limited metadata available** - no creation dates for expiry calculations
+- **Retrieval process required** - tapes must be moved back to gateway before deletion
+- **Time and cost implications** - VTS retrieval can take hours and incurs charges
 
 **Updated Approach**:
 ```python
-# Instead of parsing tape ARNs (unreliable), discover gateways
-gateways = storagegateway.list_gateways()
-for gateway in gateways:
-    try:
-        # Try to get tape details from this gateway
-        response = storagegateway.describe_tapes(
-            GatewayARN=gateway['GatewayARN'], 
-            TapeARNs=requested_tape_arns
-        )
-        # Process found tapes and remove from remaining list
-    except Exception:
-        # Gateway doesn't have these tapes, try next gateway
-        continue
+# Separate tapes by status
+for tape_arn in tape_arns:
+    basic_tape = basic_tape_dict.get(tape_arn)
+    if basic_tape and basic_tape.get('TapeStatus') == 'ARCHIVED':
+        # Handle as archived tape - limited info available
+        archived_tape_arns.append(tape_arn)
+    else:
+        # Handle as active tape - full details available
+        active_tape_arns.append(tape_arn)
 ```
 
 #### aws-azure-login Integration
