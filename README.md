@@ -42,7 +42,8 @@ Your AWS credentials need the following permissions:
                 "storagegateway:ListGateways",
                 "storagegateway:ListTapes",
                 "storagegateway:DescribeTapes",
-                "storagegateway:DeleteTape"
+                "storagegateway:DeleteTape",
+                "storagegateway:RetrieveTapeArchive"
             ],
             "Resource": "*"
         }
@@ -367,14 +368,47 @@ Tapes not found:
 - Archived tapes cannot be accessed via regular Storage Gateway APIs
 
 **Script Behavior with Archived Tapes:**
-- **Inventory**: Shows archived tapes with available basic information
-- **Deletion**: Cannot delete archived tapes directly (they must be retrieved first)
-- **Metadata**: Limited information available (no creation dates, detailed status)
+
+**Inventory Operations:**
+- ✅ **Shows archived tapes** with available basic information
+- ⚠️ **Limited metadata** available (no creation dates, detailed status)
+- ✅ **Generates tape lists** that can be used for planning
+
+**Expiry Detection for Archived Tapes:**
+- 🔍 **Assumes archived tapes are old** since archiving typically happens to older tapes
+- ✅ **Considers archived tapes expired** unless expiry threshold is very conservative (> 10 years)
+- ⚠️ **Cannot calculate exact age** due to missing creation dates
+- 📊 **Provides clear reporting** on archived vs active expired tapes
+
+**Deletion Operations:**
+- ❌ **Cannot delete archived tapes directly** (AWS API limitation)
+- ✅ **Identifies archived expired tapes** for planning purposes
+- 📋 **Provides clear instructions** on how to handle archived tapes
+
+**Expected Results in ap-prod Environment:**
+Based on diagnostic results showing 2943 archived tapes, you should expect:
+```bash
+# Inventory command
+./cleanup_tapes.sh --region ap-southeast-2 --list-all
+# Result: Shows all 2943 archived tapes
+
+# Expiry command  
+./cleanup_tapes.sh --region ap-southeast-2 --expiry-days 60
+# Result: Identifies most/all archived tapes as expired (since they're likely old)
+# But reports that they cannot be deleted directly
+```
 
 **To Delete Archived Tapes:**
-1. Use AWS Console or CLI to retrieve tapes from VTS back to the gateway
-2. Wait for retrieval to complete (can take several hours)
-3. Once retrieved, tapes can be deleted using this script
+1. **Retrieve from VTS**: Use AWS Console or CLI to retrieve tapes from Virtual Tape Shelf back to the gateway
+2. **Wait for retrieval**: This process can take several hours and incurs charges
+3. **Delete retrieved tapes**: Once back in the gateway (status becomes AVAILABLE), use this script to delete them
+
+**Retrieval Command Example:**
+```bash
+aws storagegateway retrieve-tape-archive \
+  --tape-arn arn:aws:storagegateway:ap-southeast-2:039331822418:tape/AP0021A5 \
+  --gateway-arn arn:aws:storagegateway:ap-southeast-2:039331822418:gateway/sgw-A208E6CB
+```
 
 ### API Requirements Note
 

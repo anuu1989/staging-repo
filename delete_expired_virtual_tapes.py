@@ -333,8 +333,8 @@ class VirtualTapeManager:
         Determine if a virtual tape has exceeded the expiry threshold
         
         This method calculates the age of a tape based on its creation date
-        and compares it against the configured expiry threshold. Tapes older
-        than the threshold are considered expired and eligible for deletion.
+        and compares it against the configured expiry threshold. For archived
+        tapes without creation dates, it uses alternative logic.
         
         Args:
             tape (Dict): Tape information dictionary from describe_tapes API
@@ -346,31 +346,51 @@ class VirtualTapeManager:
         Note:
             - Uses UTC timezone for consistent date calculations
             - Handles timezone-naive dates by assuming UTC
-            - Returns False for tapes without creation dates (safety measure)
+            - For archived tapes without creation dates, considers them expired if expiry_days > 0
+            - Returns False for tapes without creation dates only if expiry_days is very large (> 3650 days / 10 years)
         """
         try:
             # Extract creation date from tape metadata
             creation_date = tape.get('TapeCreatedDate')
-            if not creation_date:
-                # If no creation date, assume tape is not expired (safety measure)
-                return False
+            tape_status = tape.get('TapeStatus', 'Unknown')
             
-            # Get current time in UTC for consistent comparison
-            now = datetime.now(timezone.utc)
-            
-            # Ensure creation date has timezone info for proper comparison
-            if creation_date.tzinfo is None:
-                # If timezone-naive, assume UTC (AWS typically returns UTC dates)
-                creation_date = creation_date.replace(tzinfo=timezone.utc)
-            
-            # Calculate age in days by subtracting creation date from now
-            age_days = (now - creation_date).days
-            
-            # Return True if tape is older than the expiry threshold
-            return age_days > expiry_days
+            if creation_date:
+                # We have a creation date - use normal age calculation
+                # Get current time in UTC for consistent comparison
+                now = datetime.now(timezone.utc)
+                
+                # Ensure creation date has timezone info for proper comparison
+                if creation_date.tzinfo is None:
+                    # If timezone-naive, assume UTC (AWS typically returns UTC dates)
+                    creation_date = creation_date.replace(tzinfo=timezone.utc)
+                
+                # Calculate age in days by subtracting creation date from now
+                age_days = (now - creation_date).days
+                
+                # Return True if tape is older than the expiry threshold
+                return age_days > expiry_days
+            else:
+                # No creation date available - this is common for archived tapes
+                logger.debug(f"No creation date for tape {tape.get('TapeBarcode', 'Unknown')} (Status: {tape_status})")
+                
+                if tape_status == 'ARCHIVED':
+                    # For archived tapes, we assume they are old since archiving typically happens
+                    # to older tapes. We'll consider them expired unless the expiry threshold
+                    # is very conservative (> 10 years)
+                    if expiry_days > 3650:  # More than 10 years
+                        logger.info(f"Archived tape {tape.get('TapeBarcode', 'Unknown')} not considered expired due to very long expiry threshold ({expiry_days} days)")
+                        return False
+                    else:
+                        logger.info(f"Archived tape {tape.get('TapeBarcode', 'Unknown')} considered expired (no creation date, expiry threshold: {expiry_days} days)")
+                        return True
+                else:
+                    # For non-archived tapes without creation dates, be conservative
+                    logger.warning(f"Non-archived tape {tape.get('TapeBarcode', 'Unknown')} has no creation date - assuming not expired")
+                    return False
+                    
         except Exception as e:
             # Log error and return False (conservative approach - don't delete on error)
-            logger.error(f"Error checking tape expiry: {e}")
+            logger.error(f"Error checking tape expiry for {tape.get('TapeBarcode', 'Unknown')}: {e}")
             return False
 
     def delete_virtual_tape(self, tape_arn: str, bypass_governance_retention: bool = False) -> bool:
@@ -390,7 +410,8 @@ class VirtualTapeManager:
             bool: True if deletion was successful, False otherwise
         
         Note:
-            - Tape must be in AVAILABLE or ARCHIVED status to be deletable
+            - Tape must be in AVAILABLE status to be deletable via Storage Gateway
+            - ARCHIVED tapes cannot be deleted directly - they must be retrieved from VTS first
             - Some tapes may have retention policies preventing deletion
             - The bypass_governance_retention flag can override some restrictions
             - Deletion is permanent and cannot be undone
@@ -399,10 +420,57 @@ class VirtualTapeManager:
             https://docs.aws.amazon.com/storagegateway/latest/APIReference/API_DeleteTape.html
         """
         try:
-            # Extract Gateway ARN from Tape ARN for the API call
-            # Tape ARN format: arn:aws:storagegateway:region:account:tape/gateway-id/tape-id
-            # Gateway ARN format: arn:aws:storagegateway:region:account:gateway/gateway-id
-            gateway_arn = tape_arn.split('/')[0] + '/' + tape_arn.split('/')[1]
+            # Check if this is an archived tape first
+            # We need to get the tape status to determine if it can be deleted
+            basic_tapes = self.list_virtual_tapes()
+            tape_info = None
+            for tape in basic_tapes:
+                if tape.get('TapeARN') == tape_arn:
+                    tape_info = tape
+                    break
+            
+            if not tape_info:
+                logger.error(f"Tape not found: {tape_arn}")
+                return False
+            
+            tape_status = tape_info.get('TapeStatus', 'Unknown')
+            tape_barcode = tape_info.get('TapeBarcode', 'Unknown')
+            
+            if tape_status == 'ARCHIVED':
+                logger.error(f"Cannot delete archived tape {tape_barcode} ({tape_arn}). Archived tapes must be retrieved from VTS first.")
+                return False
+            
+            # For non-archived tapes, we need to find the gateway that owns this tape
+            # Try to get the gateway ARN by querying all gateways
+            gateways_response = self.storagegateway.list_gateways(Limit=100)
+            gateways = gateways_response.get('Gateways', [])
+            
+            gateway_arn = None
+            for gateway in gateways:
+                current_gateway_arn = gateway.get('GatewayARN')
+                if not current_gateway_arn:
+                    continue
+                    
+                try:
+                    # Try to get details for this tape from this gateway
+                    response = self.storagegateway.describe_tapes(
+                        GatewayARN=current_gateway_arn,
+                        TapeARNs=[tape_arn]
+                    )
+                    
+                    detailed_tapes = response.get('Tapes', [])
+                    if detailed_tapes:
+                        # Found the gateway that owns this tape
+                        gateway_arn = current_gateway_arn
+                        break
+                        
+                except Exception:
+                    # This gateway doesn't have this tape, try next
+                    continue
+            
+            if not gateway_arn:
+                logger.error(f"Could not find gateway for tape {tape_barcode} ({tape_arn})")
+                return False
             
             # Call AWS API to delete the tape
             self.storagegateway.delete_tape(
@@ -412,13 +480,140 @@ class VirtualTapeManager:
             )
             
             # Log successful deletion
-            logger.info(f"Successfully deleted tape: {tape_arn}")
+            logger.info(f"Successfully deleted tape: {tape_barcode} ({tape_arn})")
             return True
+            
         except Exception as e:
             # Log error with tape ARN for troubleshooting
             # Don't raise exception - let caller handle the failure
             logger.error(f"Failed to delete tape {tape_arn}: {e}")
             return False
+
+    def retrieve_archived_tapes(self, tape_arns: List[str], gateway_arn: str) -> Dict:
+        """
+        Retrieve archived virtual tapes from Virtual Tape Shelf (VTS) back to Storage Gateway
+        
+        This method initiates the retrieval process for archived tapes, making them
+        available for deletion or other operations. The retrieval process can take
+        several hours to complete and incurs additional charges.
+        
+        Args:
+            tape_arns (List[str]): List of archived tape ARNs to retrieve
+            gateway_arn (str): Storage Gateway ARN where tapes should be retrieved
+        
+        Returns:
+            Dict: Results summary containing:
+                - total_tapes_requested: Number of tapes requested for retrieval
+                - retrieval_initiated: Number of retrievals successfully initiated
+                - failed_retrievals: Number of retrieval requests that failed
+                - errors: List of error messages encountered
+                - retrieval_jobs: List of retrieval job information
+        
+        Note:
+            - Only works for tapes with ARCHIVED status
+            - Retrieval process can take 3-5 hours to complete
+            - Incurs additional charges for data retrieval from VTS
+            - Tapes must be retrieved to the same gateway type (VTL)
+        
+        AWS API Reference:
+            https://docs.aws.amazon.com/storagegateway/latest/APIReference/API_RetrieveTapeArchive.html
+        """
+        results = {
+            'total_tapes_requested': len(tape_arns),
+            'retrieval_initiated': 0,
+            'failed_retrievals': 0,
+            'errors': [],
+            'retrieval_jobs': [],
+            'skipped_tapes': []
+        }
+
+        try:
+            logger.info(f"Starting retrieval process for {len(tape_arns)} tapes to gateway {gateway_arn}")
+            
+            # First, verify that the tapes are actually archived
+            basic_tapes = self.list_virtual_tapes()
+            tape_status_map = {tape['TapeARN']: tape for tape in basic_tapes}
+            
+            archived_tapes = []
+            for tape_arn in tape_arns:
+                tape_info = tape_status_map.get(tape_arn)
+                if not tape_info:
+                    logger.warning(f"Tape not found: {tape_arn}")
+                    results['errors'].append(f"Tape not found: {tape_arn}")
+                    results['failed_retrievals'] += 1
+                    continue
+                
+                tape_status = tape_info.get('TapeStatus', 'Unknown')
+                tape_barcode = tape_info.get('TapeBarcode', 'Unknown')
+                
+                if tape_status == 'ARCHIVED':
+                    archived_tapes.append({
+                        'arn': tape_arn,
+                        'barcode': tape_barcode,
+                        'info': tape_info
+                    })
+                else:
+                    logger.info(f"Skipping tape {tape_barcode} - Status: {tape_status} (not archived)")
+                    results['skipped_tapes'].append({
+                        'arn': tape_arn,
+                        'barcode': tape_barcode,
+                        'status': tape_status,
+                        'reason': 'Not archived'
+                    })
+            
+            logger.info(f"Found {len(archived_tapes)} archived tapes ready for retrieval")
+            
+            # Initiate retrieval for each archived tape
+            for tape in archived_tapes:
+                tape_arn = tape['arn']
+                tape_barcode = tape['barcode']
+                
+                try:
+                    logger.info(f"Initiating retrieval for tape: {tape_barcode} ({tape_arn})")
+                    
+                    # Call AWS API to retrieve the tape from VTS
+                    response = self.storagegateway.retrieve_tape_archive(
+                        TapeARN=tape_arn,
+                        GatewayARN=gateway_arn
+                    )
+                    
+                    # Extract retrieval job information
+                    retrieval_job = {
+                        'tape_arn': tape_arn,
+                        'tape_barcode': tape_barcode,
+                        'gateway_arn': gateway_arn,
+                        'initiated_at': datetime.now().isoformat(),
+                        'status': 'INITIATED'
+                    }
+                    
+                    results['retrieval_jobs'].append(retrieval_job)
+                    results['retrieval_initiated'] += 1
+                    
+                    logger.info(f"Successfully initiated retrieval for tape: {tape_barcode}")
+                    
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.error(f"Failed to initiate retrieval for tape {tape_barcode}: {e}")
+                    results['failed_retrievals'] += 1
+                    results['errors'].append(f"Failed to retrieve {tape_barcode}: {error_msg}")
+            
+            # Log summary
+            logger.info(f"Retrieval summary:")
+            logger.info(f"  - Total tapes requested: {results['total_tapes_requested']}")
+            logger.info(f"  - Retrievals initiated: {results['retrieval_initiated']}")
+            logger.info(f"  - Failed retrievals: {results['failed_retrievals']}")
+            logger.info(f"  - Skipped tapes: {len(results['skipped_tapes'])}")
+            
+            if results['retrieval_initiated'] > 0:
+                logger.info(f"Retrieval process initiated for {results['retrieval_initiated']} tapes")
+                logger.info("Note: Retrieval typically takes 3-5 hours to complete")
+                logger.info("Monitor tape status using --list-all to check progress")
+            
+        except Exception as e:
+            logger.error(f"Error in retrieve_archived_tapes: {e}")
+            results['errors'].append(str(e))
+
+        return results
 
     def list_all_tapes_detailed(self, gateway_arn: str = None) -> Dict:
         """
@@ -591,12 +786,30 @@ class VirtualTapeManager:
             logger.info(f"Found {len(expired_tapes)} expired tapes (older than {expiry_days} days)")
 
             # Step 4: Process expired tapes for deletion
+            archived_tapes_count = 0
+            active_expired_tapes = []
+            
             for tape in expired_tapes:
                 tape_arn = tape['TapeARN']
                 tape_barcode = tape.get('TapeBarcode', 'Unknown')
                 tape_status = tape.get('TapeStatus', 'Unknown')
                 
-                logger.info(f"Processing tape: {tape_barcode} (Status: {tape_status})")
+                logger.info(f"Processing expired tape: {tape_barcode} (Status: {tape_status})")
+                
+                if tape_status == 'ARCHIVED':
+                    archived_tapes_count += 1
+                    logger.warning(f"Skipping archived tape {tape_barcode} - cannot delete directly (must retrieve from VTS first)")
+                    results['errors'].append(f"Archived tape {tape_barcode} cannot be deleted directly")
+                else:
+                    active_expired_tapes.append(tape)
+            
+            logger.info(f"Found {archived_tapes_count} archived expired tapes and {len(active_expired_tapes)} active expired tapes")
+            
+            # Process active expired tapes for deletion
+            for tape in active_expired_tapes:
+                tape_arn = tape['TapeARN']
+                tape_barcode = tape.get('TapeBarcode', 'Unknown')
+                tape_status = tape.get('TapeStatus', 'Unknown')
                 
                 if dry_run:
                     # Dry-run mode: Log what would be deleted but don't actually delete
@@ -604,8 +817,7 @@ class VirtualTapeManager:
                     results['deleted_tapes'] += 1
                 else:
                     # Actual deletion mode: Check status and attempt deletion
-                    # Only delete tapes that are in a safe state for deletion
-                    if tape_status in ['AVAILABLE', 'ARCHIVED']:
+                    if tape_status in ['AVAILABLE']:  # Only AVAILABLE tapes can be deleted
                         # Attempt deletion and track results
                         if self.delete_virtual_tape(tape_arn, bypass_governance):
                             results['deleted_tapes'] += 1
@@ -616,6 +828,14 @@ class VirtualTapeManager:
                         # Skip tapes that are not in a deletable state
                         logger.warning(f"Skipping tape {tape_barcode} - Status: {tape_status} (not deletable)")
                         results['errors'].append(f"Tape {tape_barcode} not in deletable state: {tape_status}")
+            
+            # Add summary information about archived tapes
+            if archived_tapes_count > 0:
+                results['errors'].append(f"{archived_tapes_count} expired tapes are archived and cannot be deleted directly")
+                logger.warning(f"Note: {archived_tapes_count} expired tapes are archived. To delete them:")
+                logger.warning("1. Retrieve tapes from Virtual Tape Shelf (VTS) using AWS Console/CLI")
+                logger.warning("2. Wait for retrieval to complete (can take several hours)")
+                logger.warning("3. Run this script again to delete the retrieved tapes")
 
         except Exception as e:
             # Catch any unexpected errors during the process
@@ -813,6 +1033,8 @@ Examples:
                                help='Delete expired tapes based on age threshold (default mode)')
     operation_group.add_argument('--delete-specific', action='store_true',
                                help='Delete specific tapes from a provided list')
+    operation_group.add_argument('--retrieve-archived', action='store_true',
+                               help='Retrieve archived tapes from Virtual Tape Shelf (VTS) back to gateway')
     
     # Tape list specification options
     parser.add_argument('--tape-list', 
@@ -832,8 +1054,12 @@ Examples:
         logger.error("--delete-specific requires either --tape-list or --tape-file")
         sys.exit(1)
     
-    if (args.tape_list or args.tape_file) and not args.delete_specific:
-        logger.error("--tape-list and --tape-file can only be used with --delete-specific")
+    if (args.tape_list or args.tape_file) and not args.delete_specific and not args.retrieve_archived:
+        logger.error("--tape-list and --tape-file can only be used with --delete-specific or --retrieve-archived")
+        sys.exit(1)
+    
+    if args.retrieve_archived and not args.gateway_arn and not args.tape_list and not args.tape_file:
+        logger.error("--retrieve-archived requires --gateway-arn and either --tape-list or --tape-file")
         sys.exit(1)
     
     # Validate output file option
@@ -852,12 +1078,14 @@ Examples:
             logger.info(f"Output file: {args.output_file}")
     elif args.delete_specific:
         operation_mode = "delete_specific"
+    elif args.retrieve_archived:
+        operation_mode = "retrieve_archived"
     else:
         operation_mode = "delete_expired"  # Default mode
 
     # Parse tape list if provided
     tape_list = []
-    if args.delete_specific:
+    if args.delete_specific or args.retrieve_archived:
         if args.tape_list:
             # Parse comma-separated list
             tape_list = [tape.strip() for tape in args.tape_list.split(',') if tape.strip()]
@@ -874,7 +1102,7 @@ Examples:
                 sys.exit(1)
         
         if not tape_list:
-            logger.error("No tapes specified for deletion")
+            logger.error("No tapes specified for operation")
             sys.exit(1)
 
     # Log startup information for audit trail
@@ -886,10 +1114,10 @@ Examples:
     logger.info(f"Profile: {args.profile or 'default'}")
     if operation_mode == "delete_expired":
         logger.info(f"Expiry threshold: {args.expiry_days} days")
-    elif operation_mode == "delete_specific":
+    elif operation_mode in ["delete_specific", "retrieve_archived"]:
         logger.info(f"Tapes to process: {len(tape_list)}")
     logger.info(f"Gateway ARN: {args.gateway_arn or 'all gateways'}")
-    if operation_mode != "list_all":
+    if operation_mode not in ["list_all", "retrieve_archived"]:
         logger.info(f"Mode: {'DRY RUN' if dry_run else 'EXECUTE'}")
         logger.info(f"Bypass governance: {args.bypass_governance}")
     logger.info("="*60)
@@ -974,6 +1202,79 @@ Examples:
             print(f"\nErrors encountered:")
             for error in results['errors']:
                 print(f"  - {error}")
+                
+    elif operation_mode == "retrieve_archived":
+        # Retrieve archived tapes mode
+        if not args.gateway_arn:
+            print("Error: --gateway-arn is required for tape retrieval")
+            sys.exit(1)
+            
+        # Convert tape barcodes to ARNs if needed
+        tape_arns = []
+        basic_tapes = tape_manager.list_virtual_tapes()
+        tape_lookup = {}
+        
+        # Create lookup for both ARNs and barcodes
+        for tape in basic_tapes:
+            tape_arn = tape.get('TapeARN', '')
+            tape_barcode = tape.get('TapeBarcode', '')
+            if tape_arn:
+                tape_lookup[tape_arn] = tape_arn
+            if tape_barcode:
+                tape_lookup[tape_barcode] = tape_arn
+        
+        # Convert input list to ARNs
+        for tape_id in tape_list:
+            if tape_id in tape_lookup:
+                tape_arns.append(tape_lookup[tape_id])
+            else:
+                logger.warning(f"Tape not found: {tape_id}")
+        
+        if not tape_arns:
+            print("Error: No valid tapes found for retrieval")
+            sys.exit(1)
+        
+        results = tape_manager.retrieve_archived_tapes(
+            tape_arns=tape_arns,
+            gateway_arn=args.gateway_arn
+        )
+        
+        # Display retrieval results
+        print("\n" + "="*60)
+        print("TAPE RETRIEVAL RESULTS")
+        print("="*60)
+        print(f"Tapes requested for retrieval: {results['total_tapes_requested']}")
+        print(f"Retrievals initiated: {results['retrieval_initiated']}")
+        print(f"Failed retrievals: {results['failed_retrievals']}")
+        print(f"Skipped tapes: {len(results['skipped_tapes'])}")
+        
+        # Display retrieval jobs
+        if results['retrieval_jobs']:
+            print(f"\nRetrieval jobs initiated:")
+            for job in results['retrieval_jobs']:
+                print(f"  - {job['tape_barcode']}: {job['status']}")
+        
+        # Display skipped tapes
+        if results['skipped_tapes']:
+            print(f"\nSkipped tapes:")
+            for tape in results['skipped_tapes']:
+                print(f"  - {tape['barcode']}: {tape['reason']} (Status: {tape['status']})")
+        
+        # Display errors
+        if results['errors']:
+            print(f"\nErrors encountered:")
+            for error in results['errors']:
+                print(f"  - {error}")
+        
+        # Provide next steps guidance
+        if results['retrieval_initiated'] > 0:
+            print(f"\n" + "="*60)
+            print("NEXT STEPS")
+            print("="*60)
+            print("1. Wait for retrieval to complete (typically 3-5 hours)")
+            print("2. Monitor progress with: --list-all")
+            print("3. Once tapes show status 'AVAILABLE', they can be deleted")
+            print(f"4. Delete command: --delete-specific --tape-file <your_tape_file> --execute")
                 
     elif operation_mode == "delete_specific":
         # Delete specific tapes mode
