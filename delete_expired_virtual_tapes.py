@@ -92,19 +92,60 @@ class VirtualTapeManager:
             environments with many tapes, this should be enhanced with pagination.
         """
         try:
-            # Call AWS API to list tapes
-            # Limit set to 100 to avoid overwhelming the API response
+            all_tapes = []
+            
             if gateway_arn:
                 # Query specific gateway if ARN provided
-                response = self.storagegateway.list_tapes(TapeARNs=[], Limit=100)
+                logger.info(f"Listing tapes for specific gateway: {gateway_arn}")
+                try:
+                    response = self.storagegateway.list_tapes(
+                        GatewayARN=gateway_arn,
+                        Limit=100
+                    )
+                    tapes = response.get('TapeInfos', [])
+                    all_tapes.extend(tapes)
+                except Exception as e:
+                    logger.error(f"Failed to list tapes for gateway {gateway_arn}: {e}")
             else:
                 # Query all gateways in the region
-                response = self.storagegateway.list_tapes(Limit=100)
+                logger.info("Listing all Storage Gateways in the region...")
+                try:
+                    # First, get all gateways in the region
+                    gateways_response = self.storagegateway.list_gateways(Limit=100)
+                    gateways = gateways_response.get('Gateways', [])
+                    
+                    if not gateways:
+                        logger.warning("No Storage Gateways found in the region")
+                        return []
+                    
+                    logger.info(f"Found {len(gateways)} Storage Gateway(s)")
+                    
+                    # Query tapes for each gateway
+                    for gateway in gateways:
+                        gateway_arn_current = gateway.get('GatewayARN')
+                        gateway_name = gateway.get('GatewayName', 'Unknown')
+                        
+                        if gateway_arn_current:
+                            logger.info(f"Listing tapes for gateway: {gateway_name} ({gateway_arn_current})")
+                            try:
+                                response = self.storagegateway.list_tapes(
+                                    GatewayARN=gateway_arn_current,
+                                    Limit=100
+                                )
+                                tapes = response.get('TapeInfos', [])
+                                all_tapes.extend(tapes)
+                                logger.info(f"Found {len(tapes)} tapes in gateway {gateway_name}")
+                            except Exception as e:
+                                logger.error(f"Failed to list tapes for gateway {gateway_name}: {e}")
+                                continue
+                                
+                except Exception as e:
+                    logger.error(f"Failed to list gateways: {e}")
+                    return []
             
-            # Extract tape information from API response
-            tapes = response.get('TapeInfos', [])
-            logger.info(f"Found {len(tapes)} virtual tapes")
-            return tapes
+            logger.info(f"Total virtual tapes found: {len(all_tapes)}")
+            return all_tapes
+            
         except Exception as e:
             # Log error but don't crash - return empty list to allow graceful handling
             logger.error(f"Failed to list virtual tapes: {e}")
@@ -710,26 +751,35 @@ Examples:
         print("\n" + "="*60)
         print("VIRTUAL TAPE INVENTORY")
         print("="*60)
-        print(f"Total tapes found: {results['total_tapes']}")
-        print(f"Total allocated size: {results['total_size_bytes']:,} bytes ({results['total_size_bytes'] / (1024**3):.2f} GB)")
-        print(f"Total used size: {results['total_used_bytes']:,} bytes ({results['total_used_bytes'] / (1024**3):.2f} GB)")
         
-        # Display tapes by status
-        if results['tapes_by_status']:
-            print(f"\nTapes by status:")
-            for status, tapes in results['tapes_by_status'].items():
-                print(f"  {status}: {len(tapes)} tapes")
-        
-        # Display detailed tape information
-        if results['tape_details']:
-            print(f"\nDetailed tape information:")
-            print(f"{'Barcode':<15} {'Status':<12} {'Age (days)':<10} {'Size (GB)':<10} {'Used (GB)':<10}")
-            print("-" * 70)
-            for tape in results['tape_details']:
-                size_gb = tape['size_bytes'] / (1024**3) if tape['size_bytes'] else 0
-                used_gb = tape['used_bytes'] / (1024**3) if tape['used_bytes'] else 0
-                age_str = str(tape['age_days']) if tape['age_days'] is not None else 'Unknown'
-                print(f"{tape['barcode']:<15} {tape['status']:<12} {age_str:<10} {size_gb:<10.2f} {used_gb:<10.2f}")
+        if results['total_tapes'] == 0:
+            print("No virtual tapes found.")
+            print("\nPossible reasons:")
+            print("  - No Storage Gateways exist in this region")
+            print("  - No virtual tapes have been created")
+            print("  - Insufficient IAM permissions")
+            print("  - Incorrect region specified")
+        else:
+            print(f"Total tapes found: {results['total_tapes']}")
+            print(f"Total allocated size: {results['total_size_bytes']:,} bytes ({results['total_size_bytes'] / (1024**3):.2f} GB)")
+            print(f"Total used size: {results['total_used_bytes']:,} bytes ({results['total_used_bytes'] / (1024**3):.2f} GB)")
+            
+            # Display tapes by status
+            if results['tapes_by_status']:
+                print(f"\nTapes by status:")
+                for status, tapes in results['tapes_by_status'].items():
+                    print(f"  {status}: {len(tapes)} tapes")
+            
+            # Display detailed tape information
+            if results['tape_details']:
+                print(f"\nDetailed tape information:")
+                print(f"{'Barcode':<15} {'Status':<12} {'Age (days)':<10} {'Size (GB)':<10} {'Used (GB)':<10}")
+                print("-" * 70)
+                for tape in results['tape_details']:
+                    size_gb = tape['size_bytes'] / (1024**3) if tape['size_bytes'] else 0
+                    used_gb = tape['used_bytes'] / (1024**3) if tape['used_bytes'] else 0
+                    age_str = str(tape['age_days']) if tape['age_days'] is not None else 'Unknown'
+                    print(f"{tape['barcode']:<15} {tape['status']:<12} {age_str:<10} {size_gb:<10.2f} {used_gb:<10.2f}")
         
         # Display any errors
         if results['errors']:
