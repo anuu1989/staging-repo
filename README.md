@@ -85,8 +85,14 @@ Your AWS credentials need the following permissions:
 # Dry run to see what expired tapes would be deleted (default behavior)
 ./cleanup_tapes.sh --region us-east-1 --expiry-days 60
 
+# Dry run with results saved to file
+./cleanup_tapes.sh --region us-east-1 --expiry-days 60 --output-file expired_results.txt
+
 # Actually delete expired tapes
 ./cleanup_tapes.sh --region us-east-1 --expiry-days 60 --execute
+
+# Delete and save results to file
+./cleanup_tapes.sh --region us-east-1 --expiry-days 60 --execute --output-file deletion_results.txt
 
 # Use specific AWS profile with custom expiry threshold
 ./cleanup_tapes.sh --region us-west-2 --profile production --expiry-days 90 --execute
@@ -98,11 +104,14 @@ Your AWS credentials need the following permissions:
 # Delete specific tapes by barcode/ARN (dry-run)
 ./cleanup_tapes.sh --region us-east-1 --delete-specific --tape-list "VTL001,VTL002,VTL003"
 
+# Dry run with results saved to file
+./cleanup_tapes.sh --region us-east-1 --delete-specific --tape-list "VTL001,VTL002,VTL003" --output-file deletion_preview.txt
+
 # Actually delete specific tapes
 ./cleanup_tapes.sh --region us-east-1 --delete-specific --tape-list "VTL001,VTL002" --execute
 
-# Delete tapes listed in a file
-./cleanup_tapes.sh --region us-east-1 --delete-specific --tape-file tapes_to_delete.txt --execute
+# Delete tapes listed in a file and save results
+./cleanup_tapes.sh --region us-east-1 --delete-specific --tape-file tapes_to_delete.txt --execute --output-file deletion_results.txt
 ```
 
 #### 4. Workflow: List Then Delete
@@ -189,11 +198,15 @@ python3 delete_expired_virtual_tapes.py --region us-east-1 --delete-specific --t
 ### Output Options
 | Option | Description | Used with |
 |--------|-------------|-----------|
-| `--output-file` | Save tape list to file (one barcode per line) | `--list-all` |
+| `--output-file` | Save results to file. For --list-all: tape barcodes (one per line). For other modes: detailed results summary | All operation modes |
 
-## Generated Tape List File Format
+## Generated Output File Formats
 
-When using `--output-file` with `--list-all`, the generated file contains:
+The `--output-file` option saves results to a file, with different formats depending on the operation mode:
+
+### 1. List All Tapes Output (--list-all)
+
+When using `--output-file` with `--list-all`, the generated file contains tape barcodes (one per line):
 
 ```
 # Virtual Tape List
@@ -219,11 +232,96 @@ VTL005
 - **With Results**: If tapes are found, each tape barcode is listed on a separate line
 - **Ready to Use**: The file format is immediately compatible with `--delete-specific --tape-file`
 
-This file can be:
-- **Edited** to remove tapes you want to keep
-- **Used directly** with `--delete-specific --tape-file`
-- **Shared** for review and approval processes
-- **Archived** for audit and compliance purposes
+### 2. Delete Expired Tapes Output (--delete-expired)
+
+When using `--output-file` with `--delete-expired`, the file contains a summary of the cleanup operation:
+
+```
+# Expired Tape Cleanup Results
+# Generated on: 2024-01-22 15:45:30
+# Region: us-east-1
+# Gateway: all gateways
+# Expiry threshold: 60 days
+# Mode: DRY RUN
+#
+# Total tapes found: 25
+# Expired tapes: 8
+# Would delete: 8
+# Failed deletions: 0
+#
+
+# Errors:
+# 2 expired tapes are archived and cannot be deleted directly
+
+# Summary:
+# Operation completed successfully
+# To execute deletion, run with --execute flag
+```
+
+### 3. Delete Specific Tapes Output (--delete-specific)
+
+When using `--output-file` with `--delete-specific`, the file contains detailed processing results:
+
+```
+# Specific Tape Deletion Results
+# Generated on: 2024-01-22 16:00:15
+# Region: us-east-1
+# Mode: EXECUTE
+#
+# Tapes requested: 5
+# Tapes found: 4
+# Tapes not found: 1
+# Deleted: 4
+# Failed deletions: 0
+#
+
+# Processed Tapes:
+# Identifier	Barcode	Status	Action	Success
+VTL001	VTL001	AVAILABLE	deleted	True
+VTL002	VTL002	AVAILABLE	deleted	True
+VTL003	VTL003	AVAILABLE	deleted	True
+VTL004	VTL004	AVAILABLE	deleted	True
+
+# Tapes Not Found:
+# VTL999
+
+# Errors:
+```
+
+### 4. Retrieve Archived Tapes Output (--retrieve-archived)
+
+When using `--output-file` with `--retrieve-archived`, the file contains retrieval job information:
+
+```
+# Tape Retrieval Results
+# Generated on: 2024-01-22 16:15:45
+# Region: ap-southeast-2
+# Gateway: arn:aws:storagegateway:ap-southeast-2:123456789012:gateway/sgw-A208E6CB
+#
+# Tapes requested: 3
+# Retrievals initiated: 3
+# Failed retrievals: 0
+# Skipped tapes: 0
+#
+
+# Retrieval Jobs Initiated:
+AP0021A5	INITIATED	2024-01-22T16:15:45.123456
+AP0023A1	INITIATED	2024-01-22T16:15:46.234567
+AP0025A5	INITIATED	2024-01-22T16:15:47.345678
+
+# Skipped Tapes:
+
+# Errors:
+```
+
+### Using Output Files
+
+These output files can be:
+- **Reviewed** for audit and compliance purposes
+- **Shared** for approval workflows
+- **Archived** for record-keeping
+- **Analyzed** for reporting and metrics
+- **Reused** (list-all output) as input for delete-specific operations
 
 ## Manual Tape List File Format
 

@@ -145,9 +145,10 @@ TAPE SPECIFICATION OPTIONS (for --delete-specific):
     --tape-file FILE            File containing tape ARNs or barcodes (one per line)
                                Lines starting with # are treated as comments
 
-OUTPUT OPTIONS (for --list-all):
-    --output-file FILE          Save tape list to file (one barcode per line)
-                               Can be used later with --delete-specific --tape-file
+OUTPUT OPTIONS:
+    --output-file FILE          Save results to file
+                               For --list-all: tape barcodes (one per line)
+                               For other modes: detailed results summary
                                
     -h, --help                  Show this help message and exit
 
@@ -373,14 +374,6 @@ if [[ "$RETRIEVE_ARCHIVED" == "true" ]]; then
     fi
 fi
 
-# Validate that output file is only used with list-all mode
-if [[ -n "$OUTPUT_FILE" && "$LIST_ALL" != "true" ]]; then
-    print_error "--output-file can only be used with --list-all"
-    echo ""
-    show_usage
-    exit 1
-fi
-
 # Validate that the expiry days is a positive number
 if [[ ! "$EXPIRY_DAYS" =~ ^[0-9]+$ ]] || [[ "$EXPIRY_DAYS" -le 0 ]]; then
     print_error "Expiry days must be a positive integer, got: $EXPIRY_DAYS"
@@ -449,12 +442,6 @@ CMD="python3 delete_expired_virtual_tapes.py --region $REGION"
 if [[ "$LIST_ALL" == "true" ]]; then
     CMD="$CMD --list-all"
     print_info "Operation mode: List all tapes (inventory)"
-    
-    # Add output file if specified
-    if [[ -n "$OUTPUT_FILE" ]]; then
-        CMD="$CMD --output-file \"$OUTPUT_FILE\""
-        print_info "Output file: $OUTPUT_FILE"
-    fi
 elif [[ "$DELETE_SPECIFIC" == "true" ]]; then
     CMD="$CMD --delete-specific"
     print_info "Operation mode: Delete specific tapes"
@@ -475,6 +462,12 @@ fi
 if [[ -n "$GATEWAY_ARN" ]]; then
     CMD="$CMD --gateway-arn $GATEWAY_ARN"
     print_info "Targeting specific gateway: $GATEWAY_ARN"
+fi
+
+# Add output file if specified (works for all modes now)
+if [[ -n "$OUTPUT_FILE" ]]; then
+    CMD="$CMD --output-file \"$OUTPUT_FILE\""
+    print_info "Output file: $OUTPUT_FILE"
 fi
 
 # Add mode-specific parameters

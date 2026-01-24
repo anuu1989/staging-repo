@@ -1044,7 +1044,7 @@ Examples:
     
     # Output options
     parser.add_argument('--output-file', 
-                       help='Save tape list to file (use with --list-all). File will contain tape barcodes, one per line')
+                       help='Save results to file. For --list-all: tape barcodes (one per line). For other modes: detailed results summary')
     
     # Parse command-line arguments
     args = parser.parse_args()
@@ -1060,11 +1060,6 @@ Examples:
     
     if args.retrieve_archived and not args.gateway_arn and not args.tape_list and not args.tape_file:
         logger.error("--retrieve-archived requires --gateway-arn and either --tape-list or --tape-file")
-        sys.exit(1)
-    
-    # Validate output file option
-    if args.output_file and not args.list_all:
-        logger.error("--output-file can only be used with --list-all")
         sys.exit(1)
 
     # Determine execution mode: dry-run is default unless --execute is specified
@@ -1275,6 +1270,48 @@ Examples:
             print("2. Monitor progress with: --list-all")
             print("3. Once tapes show status 'AVAILABLE', they can be deleted")
             print(f"4. Delete command: --delete-specific --tape-file <your_tape_file> --execute")
+        
+        # Save results to file if requested
+        if args.output_file:
+            try:
+                with open(args.output_file, 'w') as f:
+                    f.write("# Tape Retrieval Results\n")
+                    f.write(f"# Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"# Region: {args.region}\n")
+                    f.write(f"# Gateway: {args.gateway_arn}\n")
+                    f.write("#\n")
+                    f.write(f"# Tapes requested: {results['total_tapes_requested']}\n")
+                    f.write(f"# Retrievals initiated: {results['retrieval_initiated']}\n")
+                    f.write(f"# Failed retrievals: {results['failed_retrievals']}\n")
+                    f.write(f"# Skipped tapes: {len(results['skipped_tapes'])}\n")
+                    f.write("#\n\n")
+                    
+                    # Write retrieval jobs
+                    if results['retrieval_jobs']:
+                        f.write("# Retrieval Jobs Initiated:\n")
+                        for job in results['retrieval_jobs']:
+                            f.write(f"{job['tape_barcode']}\t{job['status']}\t{job['initiated_at']}\n")
+                        f.write("\n")
+                    
+                    # Write skipped tapes
+                    if results['skipped_tapes']:
+                        f.write("# Skipped Tapes:\n")
+                        for tape in results['skipped_tapes']:
+                            f.write(f"# {tape['barcode']}\t{tape['status']}\t{tape['reason']}\n")
+                        f.write("\n")
+                    
+                    # Write errors
+                    if results['errors']:
+                        f.write("# Errors:\n")
+                        for error in results['errors']:
+                            f.write(f"# {error}\n")
+                
+                logger.info(f"Retrieval results saved to: {args.output_file}")
+                print(f"\nRetrieval results saved to: {args.output_file}")
+                
+            except Exception as e:
+                logger.error(f"Failed to save retrieval results to file: {e}")
+                print(f"Error: Failed to save results to {args.output_file}: {e}")
                 
     elif operation_mode == "delete_specific":
         # Delete specific tapes mode
@@ -1313,6 +1350,50 @@ Examples:
             print(f"\nErrors encountered:")
             for error in results['errors']:
                 print(f"  - {error}")
+        
+        # Save results to file if requested
+        if args.output_file:
+            try:
+                with open(args.output_file, 'w') as f:
+                    f.write("# Specific Tape Deletion Results\n")
+                    f.write(f"# Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"# Region: {args.region}\n")
+                    f.write(f"# Mode: {'DRY RUN' if dry_run else 'EXECUTE'}\n")
+                    f.write("#\n")
+                    f.write(f"# Tapes requested: {results['total_tapes_requested']}\n")
+                    f.write(f"# Tapes found: {results['tapes_found']}\n")
+                    f.write(f"# Tapes not found: {results['tapes_not_found']}\n")
+                    f.write(f"# {'Would delete' if dry_run else 'Deleted'}: {results['deleted_tapes']}\n")
+                    f.write(f"# Failed deletions: {results['failed_deletions']}\n")
+                    f.write("#\n\n")
+                    
+                    # Write processed tapes
+                    if results['processed_tapes']:
+                        f.write("# Processed Tapes:\n")
+                        f.write("# Identifier\tBarcode\tStatus\tAction\tSuccess\n")
+                        for tape in results['processed_tapes']:
+                            f.write(f"{tape['identifier']}\t{tape['barcode']}\t{tape['status']}\t{tape['action_taken']}\t{tape['success']}\n")
+                        f.write("\n")
+                    
+                    # Write not found tapes
+                    if results['not_found_tapes']:
+                        f.write("# Tapes Not Found:\n")
+                        for tape_id in results['not_found_tapes']:
+                            f.write(f"# {tape_id}\n")
+                        f.write("\n")
+                    
+                    # Write errors
+                    if results['errors']:
+                        f.write("# Errors:\n")
+                        for error in results['errors']:
+                            f.write(f"# {error}\n")
+                
+                logger.info(f"Deletion results saved to: {args.output_file}")
+                print(f"\nDeletion results saved to: {args.output_file}")
+                
+            except Exception as e:
+                logger.error(f"Failed to save deletion results to file: {e}")
+                print(f"Error: Failed to save results to {args.output_file}: {e}")
                 
     else:
         # Delete expired tapes mode (default)
@@ -1342,6 +1423,43 @@ Examples:
         if dry_run and results['expired_tapes'] > 0:
             print(f"\nTo actually delete the tapes, run with --execute flag")
             print(f"Command: python3 {sys.argv[0]} {' '.join(sys.argv[1:])} --execute")
+        
+        # Save results to file if requested
+        if args.output_file:
+            try:
+                with open(args.output_file, 'w') as f:
+                    f.write("# Expired Tape Cleanup Results\n")
+                    f.write(f"# Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"# Region: {args.region}\n")
+                    f.write(f"# Gateway: {args.gateway_arn or 'all gateways'}\n")
+                    f.write(f"# Expiry threshold: {args.expiry_days} days\n")
+                    f.write(f"# Mode: {'DRY RUN' if dry_run else 'EXECUTE'}\n")
+                    f.write("#\n")
+                    f.write(f"# Total tapes found: {results['total_tapes']}\n")
+                    f.write(f"# Expired tapes: {results['expired_tapes']}\n")
+                    f.write(f"# {'Would delete' if dry_run else 'Deleted'}: {results['deleted_tapes']}\n")
+                    f.write(f"# Failed deletions: {results['failed_deletions']}\n")
+                    f.write("#\n\n")
+                    
+                    # Write errors
+                    if results['errors']:
+                        f.write("# Errors:\n")
+                        for error in results['errors']:
+                            f.write(f"# {error}\n")
+                        f.write("\n")
+                    
+                    # Write summary
+                    f.write("# Summary:\n")
+                    f.write(f"# Operation completed successfully\n")
+                    if dry_run and results['expired_tapes'] > 0:
+                        f.write(f"# To execute deletion, run with --execute flag\n")
+                
+                logger.info(f"Cleanup results saved to: {args.output_file}")
+                print(f"\nCleanup results saved to: {args.output_file}")
+                
+            except Exception as e:
+                logger.error(f"Failed to save cleanup results to file: {e}")
+                print(f"Error: Failed to save results to {args.output_file}: {e}")
 
     # Log completion
     logger.info("Virtual Tape Cleanup Process Completed")
