@@ -42,7 +42,6 @@ BYPASS_GOVERNANCE=false     # Default to respecting governance retention
 LIST_ALL=false              # List all tapes mode
 DELETE_EXPIRED=true         # Delete expired tapes mode (default)
 DELETE_SPECIFIC=false       # Delete specific tapes mode
-RETRIEVE_ARCHIVED=false     # Retrieve archived tapes mode
 
 # Tape specification options (for delete-specific mode)
 TAPE_LIST=""                # Comma-separated list of tapes
@@ -50,6 +49,9 @@ TAPE_FILE=""                # File containing tape list
 
 # Output options
 OUTPUT_FILE=""              # File to save tape list (for list-all mode)
+
+# Status filter options
+STATUS_FILTER=""            # Filter tapes by status (for list-all mode)
 
 #==============================================================================
 # COLOR DEFINITIONS FOR OUTPUT FORMATTING
@@ -134,9 +136,6 @@ OPERATION MODE OPTIONS (mutually exclusive):
                                
     --delete-specific           Delete specific tapes from a provided list
                                Requires --tape-list or --tape-file
-                               
-    --retrieve-archived         Retrieve archived tapes from Virtual Tape Shelf (VTS)
-                               Requires --gateway-arn and --tape-list or --tape-file
 
 TAPE SPECIFICATION OPTIONS (for --delete-specific):
     --tape-list "tape1,tape2"   Comma-separated list of tape ARNs or barcodes
@@ -149,6 +148,13 @@ OUTPUT OPTIONS:
     --output-file FILE          Save results to file
                                For --list-all: tape barcodes (one per line)
                                For other modes: detailed results summary
+
+STATUS FILTER OPTIONS (for --list-all):
+    --status-filter STATUS      Filter tapes by status (comma-separated list)
+                               Valid values: AVAILABLE, RETRIEVED, ARCHIVED, 
+                               CREATING, IN_TRANSIT_TO_VTS, DELETING, DELETED,
+                               IRRECOVERABLE, RECOVERING
+                               Example: --status-filter AVAILABLE,ARCHIVED
                                
     -h, --help                  Show this help message and exit
 
@@ -165,6 +171,15 @@ EXAMPLES:
 
     # List all tapes and save to file for later use
     $0 --region us-east-1 --list-all --output-file all_tapes.txt
+
+    # List only AVAILABLE and ARCHIVED tapes
+    $0 --region us-east-1 --list-all --status-filter AVAILABLE,ARCHIVED
+
+    # List only AVAILABLE tapes and save to file
+    $0 --region us-east-1 --list-all --status-filter AVAILABLE --output-file available_tapes.txt
+
+    # List only ARCHIVED tapes
+    $0 --region us-east-1 --list-all --status-filter ARCHIVED --output-file archived_tapes.txt
 
     # Safe dry-run to preview what expired tapes would be deleted (default mode)
     $0 --region us-east-1 --expiry-days 60
@@ -183,15 +198,9 @@ EXAMPLES:
     # Edit all_tapes.txt to keep only tapes you want to delete
     $0 --region us-east-1 --delete-specific --tape-file all_tapes.txt --execute
 
-    # Retrieve archived tapes from VTS
-    $0 --region ap-southeast-2 --retrieve-archived --gateway-arn arn:aws:storagegateway:ap-southeast-2:123456789012:gateway/sgw-A208E6CB --tape-file archived_tapes.txt
-
-    # Complete workflow: List → Retrieve → Delete
-    $0 --region ap-southeast-2 --list-all --output-file all_tapes.txt
-    # Edit all_tapes.txt to keep only archived tapes you want to delete
-    $0 --region ap-southeast-2 --retrieve-archived --gateway-arn arn:aws:... --tape-file all_tapes.txt
-    # Wait 3-5 hours for retrieval to complete
-    $0 --region ap-southeast-2 --delete-specific --tape-file all_tapes.txt --execute
+    # Delete archived tapes directly (no retrieval needed!)
+    $0 --region ap-southeast-2 --list-all --status-filter ARCHIVED --output-file archived.txt
+    $0 --region ap-southeast-2 --delete-specific --tape-file archived.txt --execute
 
     # Use specific AWS profile for multi-account environments
     $0 --region us-west-2 --profile production --expiry-days 90 --execute
@@ -213,7 +222,7 @@ REQUIRED IAM PERMISSIONS:
     • storagegateway:ListTapes
     • storagegateway:DescribeTapes  
     • storagegateway:DeleteTape
-    • storagegateway:RetrieveTapeArchive
+    • storagegateway:DeleteTapeArchive
 
 For more information, see the README.md file.
 
@@ -278,15 +287,6 @@ while [[ $# -gt 0 ]]; do
             DELETE_SPECIFIC=true
             LIST_ALL=false
             DELETE_EXPIRED=false
-            RETRIEVE_ARCHIVED=false
-            shift 1
-            ;;
-        --retrieve-archived)
-            # Retrieve archived tapes mode
-            RETRIEVE_ARCHIVED=true
-            LIST_ALL=false
-            DELETE_EXPIRED=false
-            DELETE_SPECIFIC=false
             shift 1
             ;;
         --tape-list)
@@ -302,6 +302,11 @@ while [[ $# -gt 0 ]]; do
         --output-file)
             # File to save tape list (for list-all mode)
             OUTPUT_FILE="$2"
+            shift 2
+            ;;
+        --status-filter)
+            # Filter tapes by status (for list-all mode)
+            STATUS_FILTER="$2"
             shift 2
             ;;
         -h|--help)
@@ -350,28 +355,20 @@ if [[ "$DELETE_SPECIFIC" == "true" ]]; then
     fi
 fi
 
-# Validate that tape list/file options are only used with delete-specific or retrieve-archived mode
-if [[ -n "$TAPE_LIST" || -n "$TAPE_FILE" ]] && [[ "$DELETE_SPECIFIC" != "true" && "$RETRIEVE_ARCHIVED" != "true" ]]; then
-    print_error "--tape-list and --tape-file can only be used with --delete-specific or --retrieve-archived"
+# Validate that tape list/file options are only used with delete-specific mode
+if [[ -n "$TAPE_LIST" || -n "$TAPE_FILE" ]] && [[ "$DELETE_SPECIFIC" != "true" ]]; then
+    print_error "--tape-list and --tape-file can only be used with --delete-specific"
     echo ""
     show_usage
     exit 1
 fi
 
-# Validate retrieve-archived specific requirements
-if [[ "$RETRIEVE_ARCHIVED" == "true" ]]; then
-    if [[ -z "$GATEWAY_ARN" ]]; then
-        print_error "--retrieve-archived requires --gateway-arn"
-        echo ""
-        show_usage
-        exit 1
-    fi
-    if [[ -z "$TAPE_LIST" && -z "$TAPE_FILE" ]]; then
-        print_error "--retrieve-archived requires either --tape-list or --tape-file"
-        echo ""
-        show_usage
-        exit 1
-    fi
+# Validate status filter is only used with list-all mode
+if [[ -n "$STATUS_FILTER" && "$LIST_ALL" != "true" ]]; then
+    print_error "--status-filter can only be used with --list-all"
+    echo ""
+    show_usage
+    exit 1
 fi
 
 # Validate that the expiry days is a positive number
@@ -445,9 +442,6 @@ if [[ "$LIST_ALL" == "true" ]]; then
 elif [[ "$DELETE_SPECIFIC" == "true" ]]; then
     CMD="$CMD --delete-specific"
     print_info "Operation mode: Delete specific tapes"
-elif [[ "$RETRIEVE_ARCHIVED" == "true" ]]; then
-    CMD="$CMD --retrieve-archived"
-    print_info "Operation mode: Retrieve archived tapes from VTS"
 else
     CMD="$CMD --delete-expired"
     print_info "Operation mode: Delete expired tapes"
@@ -470,13 +464,19 @@ if [[ -n "$OUTPUT_FILE" ]]; then
     print_info "Output file: $OUTPUT_FILE"
 fi
 
+# Add status filter if specified (only for list-all mode)
+if [[ -n "$STATUS_FILTER" ]]; then
+    CMD="$CMD --status-filter \"$STATUS_FILTER\""
+    print_info "Status filter: $STATUS_FILTER"
+fi
+
 # Add mode-specific parameters
 if [[ "$DELETE_EXPIRED" == "true" ]]; then
     CMD="$CMD --expiry-days $EXPIRY_DAYS"
     print_info "Expiry threshold: $EXPIRY_DAYS days"
 fi
 
-if [[ "$DELETE_SPECIFIC" == "true" || "$RETRIEVE_ARCHIVED" == "true" ]]; then
+if [[ "$DELETE_SPECIFIC" == "true" ]]; then
     if [[ -n "$TAPE_LIST" ]]; then
         CMD="$CMD --tape-list \"$TAPE_LIST\""
         print_info "Using tape list: $TAPE_LIST"
@@ -487,7 +487,7 @@ if [[ "$DELETE_SPECIFIC" == "true" || "$RETRIEVE_ARCHIVED" == "true" ]]; then
 fi
 
 # Add execution mode flag if not in dry-run (only for deletion operations)
-if [[ "$LIST_ALL" != "true" && "$RETRIEVE_ARCHIVED" != "true" ]]; then
+if [[ "$LIST_ALL" != "true" ]]; then
     if [[ "$DRY_RUN" == "false" ]]; then
         CMD="$CMD --execute"
     fi
@@ -514,6 +514,9 @@ if [[ "$LIST_ALL" == "true" ]]; then
     if [[ -n "$OUTPUT_FILE" ]]; then
         print_info "Output file: $OUTPUT_FILE"
     fi
+    if [[ -n "$STATUS_FILTER" ]]; then
+        print_info "Status filter: $STATUS_FILTER"
+    fi
 elif [[ "$DELETE_SPECIFIC" == "true" ]]; then
     print_info "Operation: Delete specific tapes"
     if [[ -n "$TAPE_LIST" ]]; then
@@ -521,14 +524,6 @@ elif [[ "$DELETE_SPECIFIC" == "true" ]]; then
     else
         print_info "Tape file: $TAPE_FILE"
     fi
-elif [[ "$RETRIEVE_ARCHIVED" == "true" ]]; then
-    print_info "Operation: Retrieve archived tapes from VTS"
-    if [[ -n "$TAPE_LIST" ]]; then
-        print_info "Tape list: $TAPE_LIST"
-    else
-        print_info "Tape file: $TAPE_FILE"
-    fi
-    print_info "Target gateway: $GATEWAY_ARN"
 else
     print_info "Operation: Delete expired tapes"
     print_info "Expiry threshold: $EXPIRY_DAYS days"
@@ -536,7 +531,7 @@ fi
 
 print_info "Gateway ARN: ${GATEWAY_ARN:-all gateways in region}"
 
-if [[ "$LIST_ALL" != "true" && "$RETRIEVE_ARCHIVED" != "true" ]]; then
+if [[ "$LIST_ALL" != "true" ]]; then
     print_info "Mode: $(if [[ "$DRY_RUN" == "true" ]]; then echo "DRY RUN"; else echo "EXECUTE"; fi)"
     print_info "Bypass governance: $BYPASS_GOVERNANCE"
 fi
@@ -549,24 +544,6 @@ echo ""
 # Provide appropriate warnings based on operation mode
 if [[ "$LIST_ALL" == "true" ]]; then
     print_info "Listing all virtual tapes (read-only operation)"
-    echo ""
-elif [[ "$RETRIEVE_ARCHIVED" == "true" ]]; then
-    print_warning "⚠️  TAPE RETRIEVAL OPERATION ⚠️"
-    print_warning "This will retrieve archived tapes from Virtual Tape Shelf (VTS)"
-    print_warning "Retrieval process takes 3-5 hours and incurs additional charges"
-    echo ""
-    
-    # Require explicit user confirmation for retrieval operations
-    read -p "Are you sure you want to proceed with tape retrieval? (y/N): " -n 1 -r
-    echo ""  # Add newline after user input
-    
-    # Check if user confirmed with 'y' or 'Y'
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        print_info "Operation cancelled by user. No changes made."
-        exit 0
-    fi
-    
-    print_warning "Proceeding with tape retrieval..."
     echo ""
 elif [[ "$DRY_RUN" == "true" ]]; then
     print_warning "This is a DRY RUN. No tapes will actually be deleted."

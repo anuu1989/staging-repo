@@ -17,11 +17,13 @@ Key Features:
 """
 
 import boto3
+from botocore.exceptions import ClientError, BotoCoreError, EndpointConnectionError
 import argparse
 import logging
 from datetime import datetime, timezone
 from typing import List, Dict
 import sys
+import time
 
 # Configure logging with timestamp and level information
 # This helps track operations and debug issues during execution
@@ -39,6 +41,10 @@ class VirtualTapeManager:
     including listing, analyzing, and deleting expired tapes. It handles
     AWS API interactions and provides a clean interface for tape operations.
     """
+    
+    # AWS API retry configuration
+    MAX_RETRIES = 3
+    RETRY_DELAY = 2  # seconds
     
     def __init__(self, region: str, profile: str = None):
         """
@@ -66,7 +72,150 @@ class VirtualTapeManager:
             # Log error and exit if we can't connect to AWS
             # This is a critical failure that prevents any operations
             logger.error(f"Failed to initialize AWS client: {e}")
+            logger.error("Please check your AWS credentials and region configuration")
             sys.exit(1)
+    
+    def _handle_aws_error(self, error: Exception, operation: str, critical: bool = False) -> bool:
+        """
+        Handle AWS API errors with appropriate logging and retry logic
+        
+        Args:
+            error: The exception that was raised
+            operation: Description of the operation that failed
+            critical: If True, exit the script on error
+        
+        Returns:
+            bool: True if the error is retryable, False otherwise
+        """
+        if isinstance(error, ClientError):
+            error_code = error.response.get('Error', {}).get('Code', 'Unknown')
+            error_message = error.response.get('Error', {}).get('Message', str(error))
+            
+            # Handle specific AWS error codes
+            if error_code == 'ThrottlingException' or error_code == 'RequestLimitExceeded':
+                logger.warning(f"AWS API rate limit exceeded during {operation}")
+                logger.warning(f"Error: {error_message}")
+                logger.info("The script will retry with exponential backoff...")
+                return True  # Retryable
+                
+            elif error_code == 'LimitExceededException':
+                logger.error(f"AWS service limit exceeded during {operation}")
+                logger.error(f"Error: {error_message}")
+                logger.error("Please check your AWS service quotas and limits")
+                if critical:
+                    logger.error("This is a critical operation. Exiting...")
+                    sys.exit(1)
+                return False  # Not retryable
+                
+            elif error_code == 'InvalidGatewayRequestException':
+                logger.error(f"Invalid gateway request during {operation}")
+                logger.error(f"Error: {error_message}")
+                logger.error("The gateway may not exist or may not be accessible")
+                if critical:
+                    sys.exit(1)
+                return False
+                
+            elif error_code == 'InternalServerError' or error_code == 'ServiceUnavailableException':
+                logger.warning(f"AWS service error during {operation}")
+                logger.warning(f"Error: {error_message}")
+                logger.info("This is usually temporary. The script will retry...")
+                return True  # Retryable
+                
+            elif error_code == 'AccessDeniedException' or error_code == 'UnauthorizedOperation':
+                logger.error(f"Access denied during {operation}")
+                logger.error(f"Error: {error_message}")
+                logger.error("Please check your IAM permissions for Storage Gateway operations")
+                logger.error("Required permissions: storagegateway:ListGateways, ListTapes, DescribeTapes, DeleteTape, DeleteTapeArchive")
+                if critical:
+                    sys.exit(1)
+                return False
+                
+            elif error_code == 'ResourceNotFoundException':
+                logger.error(f"Resource not found during {operation}")
+                logger.error(f"Error: {error_message}")
+                if critical:
+                    sys.exit(1)
+                return False
+                
+            else:
+                logger.error(f"AWS API error during {operation}")
+                logger.error(f"Error Code: {error_code}")
+                logger.error(f"Error Message: {error_message}")
+                if critical:
+                    logger.error("Critical operation failed. Exiting...")
+                    sys.exit(1)
+                return False
+                
+        elif isinstance(error, EndpointConnectionError):
+            logger.error(f"Cannot connect to AWS endpoint during {operation}")
+            logger.error(f"Error: {str(error)}")
+            logger.error("Please check your internet connection and AWS region configuration")
+            if critical:
+                sys.exit(1)
+            return False
+            
+        elif isinstance(error, BotoCoreError):
+            logger.error(f"AWS SDK error during {operation}")
+            logger.error(f"Error: {str(error)}")
+            if critical:
+                sys.exit(1)
+            return False
+            
+        else:
+            logger.error(f"Unexpected error during {operation}")
+            logger.error(f"Error: {str(error)}")
+            if critical:
+                sys.exit(1)
+            return False
+    
+    def _retry_with_backoff(self, func, *args, operation: str = "operation", critical: bool = False, **kwargs):
+        """
+        Execute a function with exponential backoff retry logic
+        
+        Args:
+            func: Function to execute
+            *args: Positional arguments for the function
+            operation: Description of the operation for logging
+            critical: If True, exit on non-retryable errors
+            **kwargs: Keyword arguments for the function
+        
+        Returns:
+            The result of the function call
+        
+        Raises:
+            Exception: Re-raises the last exception if all retries fail
+        """
+        last_error = None
+        
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                return func(*args, **kwargs)
+                
+            except Exception as e:
+                last_error = e
+                is_retryable = self._handle_aws_error(e, operation, critical=False)
+                
+                if not is_retryable:
+                    if critical:
+                        logger.error(f"Non-retryable error in critical operation: {operation}")
+                        sys.exit(1)
+                    raise
+                
+                if attempt < self.MAX_RETRIES - 1:
+                    # Calculate exponential backoff delay
+                    delay = self.RETRY_DELAY * (2 ** attempt)
+                    logger.info(f"Retrying in {delay} seconds... (Attempt {attempt + 1}/{self.MAX_RETRIES})")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"All {self.MAX_RETRIES} retry attempts failed for {operation}")
+                    if critical:
+                        logger.error("Critical operation failed after all retries. Exiting...")
+                        sys.exit(1)
+                    raise last_error
+        
+        # Should not reach here, but just in case
+        if last_error:
+            raise last_error
 
     def list_virtual_tapes(self, gateway_arn: str = None) -> List[Dict]:
         """
@@ -105,8 +254,13 @@ class VirtualTapeManager:
                 if marker:
                     params['Marker'] = marker
                 
-                # Call AWS API to list tapes
-                response = self.storagegateway.list_tapes(**params)
+                # Call AWS API to list tapes with retry logic
+                response = self._retry_with_backoff(
+                    self.storagegateway.list_tapes,
+                    **params,
+                    operation="list_tapes",
+                    critical=True
+                )
                 
                 # Extract tape information from API response
                 tapes = response.get('TapeInfos', [])
@@ -244,22 +398,31 @@ class VirtualTapeManager:
                     # If we have a specific gateway ARN, use it directly
                     try:
                         logger.info(f"Getting details for {len(active_tape_arns)} active tapes from specified gateway {gateway_arn}")
-                        response = self.storagegateway.describe_tapes(
+                        response = self._retry_with_backoff(
+                            self.storagegateway.describe_tapes,
                             GatewayARN=gateway_arn,
-                            TapeARNs=active_tape_arns
+                            TapeARNs=active_tape_arns,
+                            operation=f"describe_tapes for gateway {gateway_arn}",
+                            critical=False
                         )
                         detailed_tapes = response.get('Tapes', [])
                         all_detailed_tapes.extend(detailed_tapes)
                         logger.info(f"Retrieved details for {len(detailed_tapes)} active tapes")
                     except Exception as e:
                         logger.error(f"Failed to get active tape details for gateway {gateway_arn}: {e}")
+                        self._handle_aws_error(e, f"describe_tapes for gateway {gateway_arn}", critical=False)
                 else:
                     # We need to discover gateways and try each one for active tapes
                     logger.info("Discovering Storage Gateways for active tapes...")
                     
                     try:
-                        # Get all gateways in the region
-                        gateways_response = self.storagegateway.list_gateways(Limit=100)
+                        # Get all gateways in the region with retry logic
+                        gateways_response = self._retry_with_backoff(
+                            self.storagegateway.list_gateways,
+                            Limit=100,
+                            operation="list_gateways",
+                            critical=False
+                        )
                         gateways = gateways_response.get('Gateways', [])
                         
                         if not gateways:
@@ -291,9 +454,12 @@ class VirtualTapeManager:
                                         batch_arns = remaining_list[i:i + batch_size]
                                         
                                         try:
-                                            response = self.storagegateway.describe_tapes(
+                                            response = self._retry_with_backoff(
+                                                self.storagegateway.describe_tapes,
                                                 GatewayARN=current_gateway_arn,
-                                                TapeARNs=batch_arns
+                                                TapeARNs=batch_arns,
+                                                operation=f"describe_tapes for gateway {gateway_name}",
+                                                critical=False
                                             )
                                             
                                             detailed_tapes = response.get('Tapes', [])
@@ -437,13 +603,37 @@ class VirtualTapeManager:
             tape_barcode = tape_info.get('TapeBarcode', 'Unknown')
             
             if tape_status == 'ARCHIVED':
-                logger.error(f"Cannot delete archived tape {tape_barcode} ({tape_arn}). Archived tapes must be retrieved from VTS first.")
-                return False
+                logger.warning(f"Tape {tape_barcode} is ARCHIVED. Attempting to delete from Virtual Tape Shelf (VTS)...")
+                # For archived tapes, use DeleteTapeArchive API instead
+                try:
+                    self._retry_with_backoff(
+                        self.storagegateway.delete_tape_archive,
+                        TapeARN=tape_arn,
+                        BypassGovernanceRetention=bypass_governance_retention,
+                        operation=f"delete_tape_archive for {tape_barcode}",
+                        critical=False
+                    )
+                    logger.info(f"Successfully deleted archived tape from VTS: {tape_barcode} ({tape_arn})")
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to delete archived tape {tape_barcode} from VTS: {e}")
+                    self._handle_aws_error(e, f"delete_tape_archive for {tape_barcode}", critical=False)
+                    return False
             
             # For non-archived tapes, we need to find the gateway that owns this tape
             # Try to get the gateway ARN by querying all gateways
-            gateways_response = self.storagegateway.list_gateways(Limit=100)
-            gateways = gateways_response.get('Gateways', [])
+            try:
+                gateways_response = self._retry_with_backoff(
+                    self.storagegateway.list_gateways,
+                    Limit=100,
+                    operation="list_gateways for tape deletion",
+                    critical=False
+                )
+                gateways = gateways_response.get('Gateways', [])
+            except Exception as e:
+                logger.error(f"Failed to list gateways: {e}")
+                self._handle_aws_error(e, "list_gateways for tape deletion", critical=False)
+                return False
             
             gateway_arn = None
             for gateway in gateways:
@@ -453,9 +643,12 @@ class VirtualTapeManager:
                     
                 try:
                     # Try to get details for this tape from this gateway
-                    response = self.storagegateway.describe_tapes(
+                    response = self._retry_with_backoff(
+                        self.storagegateway.describe_tapes,
                         GatewayARN=current_gateway_arn,
-                        TapeARNs=[tape_arn]
+                        TapeARNs=[tape_arn],
+                        operation=f"describe_tapes for tape {tape_barcode}",
+                        critical=False
                     )
                     
                     detailed_tapes = response.get('Tapes', [])
@@ -472,16 +665,24 @@ class VirtualTapeManager:
                 logger.error(f"Could not find gateway for tape {tape_barcode} ({tape_arn})")
                 return False
             
-            # Call AWS API to delete the tape
-            self.storagegateway.delete_tape(
-                GatewayARN=gateway_arn,  # Required: Gateway that owns the tape
-                TapeARN=tape_arn,        # Required: Specific tape to delete
-                BypassGovernanceRetention=bypass_governance_retention  # Optional: Override retention
-            )
-            
-            # Log successful deletion
-            logger.info(f"Successfully deleted tape: {tape_barcode} ({tape_arn})")
-            return True
+            # Call AWS API to delete the tape with retry logic
+            try:
+                self._retry_with_backoff(
+                    self.storagegateway.delete_tape,
+                    GatewayARN=gateway_arn,  # Required: Gateway that owns the tape
+                    TapeARN=tape_arn,        # Required: Specific tape to delete
+                    BypassGovernanceRetention=bypass_governance_retention,  # Optional: Override retention
+                    operation=f"delete_tape for {tape_barcode}",
+                    critical=False
+                )
+                
+                # Log successful deletion
+                logger.info(f"Successfully deleted tape: {tape_barcode} ({tape_arn})")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to delete tape {tape_barcode}: {e}")
+                self._handle_aws_error(e, f"delete_tape for {tape_barcode}", critical=False)
+                return False
             
         except Exception as e:
             # Log error with tape ARN for troubleshooting
@@ -489,133 +690,7 @@ class VirtualTapeManager:
             logger.error(f"Failed to delete tape {tape_arn}: {e}")
             return False
 
-    def retrieve_archived_tapes(self, tape_arns: List[str], gateway_arn: str) -> Dict:
-        """
-        Retrieve archived virtual tapes from Virtual Tape Shelf (VTS) back to Storage Gateway
-        
-        This method initiates the retrieval process for archived tapes, making them
-        available for deletion or other operations. The retrieval process can take
-        several hours to complete and incurs additional charges.
-        
-        Args:
-            tape_arns (List[str]): List of archived tape ARNs to retrieve
-            gateway_arn (str): Storage Gateway ARN where tapes should be retrieved
-        
-        Returns:
-            Dict: Results summary containing:
-                - total_tapes_requested: Number of tapes requested for retrieval
-                - retrieval_initiated: Number of retrievals successfully initiated
-                - failed_retrievals: Number of retrieval requests that failed
-                - errors: List of error messages encountered
-                - retrieval_jobs: List of retrieval job information
-        
-        Note:
-            - Only works for tapes with ARCHIVED status
-            - Retrieval process can take 3-5 hours to complete
-            - Incurs additional charges for data retrieval from VTS
-            - Tapes must be retrieved to the same gateway type (VTL)
-        
-        AWS API Reference:
-            https://docs.aws.amazon.com/storagegateway/latest/APIReference/API_RetrieveTapeArchive.html
-        """
-        results = {
-            'total_tapes_requested': len(tape_arns),
-            'retrieval_initiated': 0,
-            'failed_retrievals': 0,
-            'errors': [],
-            'retrieval_jobs': [],
-            'skipped_tapes': []
-        }
-
-        try:
-            logger.info(f"Starting retrieval process for {len(tape_arns)} tapes to gateway {gateway_arn}")
-            
-            # First, verify that the tapes are actually archived
-            basic_tapes = self.list_virtual_tapes()
-            tape_status_map = {tape['TapeARN']: tape for tape in basic_tapes}
-            
-            archived_tapes = []
-            for tape_arn in tape_arns:
-                tape_info = tape_status_map.get(tape_arn)
-                if not tape_info:
-                    logger.warning(f"Tape not found: {tape_arn}")
-                    results['errors'].append(f"Tape not found: {tape_arn}")
-                    results['failed_retrievals'] += 1
-                    continue
-                
-                tape_status = tape_info.get('TapeStatus', 'Unknown')
-                tape_barcode = tape_info.get('TapeBarcode', 'Unknown')
-                
-                if tape_status == 'ARCHIVED':
-                    archived_tapes.append({
-                        'arn': tape_arn,
-                        'barcode': tape_barcode,
-                        'info': tape_info
-                    })
-                else:
-                    logger.info(f"Skipping tape {tape_barcode} - Status: {tape_status} (not archived)")
-                    results['skipped_tapes'].append({
-                        'arn': tape_arn,
-                        'barcode': tape_barcode,
-                        'status': tape_status,
-                        'reason': 'Not archived'
-                    })
-            
-            logger.info(f"Found {len(archived_tapes)} archived tapes ready for retrieval")
-            
-            # Initiate retrieval for each archived tape
-            for tape in archived_tapes:
-                tape_arn = tape['arn']
-                tape_barcode = tape['barcode']
-                
-                try:
-                    logger.info(f"Initiating retrieval for tape: {tape_barcode} ({tape_arn})")
-                    
-                    # Call AWS API to retrieve the tape from VTS
-                    response = self.storagegateway.retrieve_tape_archive(
-                        TapeARN=tape_arn,
-                        GatewayARN=gateway_arn
-                    )
-                    
-                    # Extract retrieval job information
-                    retrieval_job = {
-                        'tape_arn': tape_arn,
-                        'tape_barcode': tape_barcode,
-                        'gateway_arn': gateway_arn,
-                        'initiated_at': datetime.now().isoformat(),
-                        'status': 'INITIATED'
-                    }
-                    
-                    results['retrieval_jobs'].append(retrieval_job)
-                    results['retrieval_initiated'] += 1
-                    
-                    logger.info(f"Successfully initiated retrieval for tape: {tape_barcode}")
-                    
-                except Exception as e:
-                    error_msg = str(e)
-                    logger.error(f"Failed to initiate retrieval for tape {tape_barcode}: {e}")
-                    results['failed_retrievals'] += 1
-                    results['errors'].append(f"Failed to retrieve {tape_barcode}: {error_msg}")
-            
-            # Log summary
-            logger.info(f"Retrieval summary:")
-            logger.info(f"  - Total tapes requested: {results['total_tapes_requested']}")
-            logger.info(f"  - Retrievals initiated: {results['retrieval_initiated']}")
-            logger.info(f"  - Failed retrievals: {results['failed_retrievals']}")
-            logger.info(f"  - Skipped tapes: {len(results['skipped_tapes'])}")
-            
-            if results['retrieval_initiated'] > 0:
-                logger.info(f"Retrieval process initiated for {results['retrieval_initiated']} tapes")
-                logger.info("Note: Retrieval typically takes 3-5 hours to complete")
-                logger.info("Monitor tape status using --list-all to check progress")
-            
-        except Exception as e:
-            logger.error(f"Error in retrieve_archived_tapes: {e}")
-            results['errors'].append(str(e))
-
-        return results
-
-    def list_all_tapes_detailed(self, gateway_arn: str = None) -> Dict:
+    def list_all_tapes_detailed(self, gateway_arn: str = None, status_filter: List[str] = None) -> Dict:
         """
         List all virtual tapes with detailed information for inventory purposes
         
@@ -625,22 +700,28 @@ class VirtualTapeManager:
         
         Args:
             gateway_arn (str, optional): Specific Storage Gateway ARN to target
+            status_filter (List[str], optional): List of tape statuses to include (e.g., ['AVAILABLE', 'RETRIEVED'])
+                                                If None, includes all tapes regardless of status
         
         Returns:
             Dict: Comprehensive tape inventory containing:
-                - total_tapes: Total number of tapes found
+                - total_tapes: Total number of tapes found (before filtering)
+                - filtered_tapes: Number of tapes after status filtering
                 - tapes_by_status: Dictionary grouping tapes by their status
-                - tape_details: List of all tape information
-                - total_size_bytes: Total allocated size across all tapes
-                - total_used_bytes: Total used space across all tapes
+                - tape_details: List of all tape information (filtered)
+                - total_size_bytes: Total allocated size across filtered tapes
+                - total_used_bytes: Total used space across filtered tapes
+                - status_filter_applied: List of statuses used for filtering (or None)
         """
         results = {
             'total_tapes': 0,
+            'filtered_tapes': 0,
             'tapes_by_status': {},
             'tape_details': [],
             'total_size_bytes': 0,
             'total_used_bytes': 0,
-            'errors': []
+            'errors': [],
+            'status_filter_applied': status_filter
         }
 
         try:
@@ -667,6 +748,10 @@ class VirtualTapeManager:
                 tape_size = tape.get('TapeSizeInBytes', 0)
                 tape_used = tape.get('TapeUsedInBytes', 0)
                 creation_date = tape.get('TapeCreatedDate')
+                
+                # Apply status filter if specified
+                if status_filter and tape_status not in status_filter:
+                    continue  # Skip tapes that don't match the filter
                 
                 # Calculate age if creation date is available
                 age_days = None
@@ -705,7 +790,12 @@ class VirtualTapeManager:
                 results['total_size_bytes'] += tape_size
                 results['total_used_bytes'] += tape_used
 
-            logger.info(f"Successfully processed {len(detailed_tapes)} tapes")
+            results['filtered_tapes'] = len(results['tape_details'])
+            
+            if status_filter:
+                logger.info(f"Successfully processed {len(detailed_tapes)} tapes, {results['filtered_tapes']} match status filter {status_filter}")
+            else:
+                logger.info(f"Successfully processed {len(detailed_tapes)} tapes")
 
         except Exception as e:
             logger.error(f"Error in list_all_tapes_detailed: {e}")
@@ -817,7 +907,7 @@ class VirtualTapeManager:
                     results['deleted_tapes'] += 1
                 else:
                     # Actual deletion mode: Check status and attempt deletion
-                    if tape_status in ['AVAILABLE']:  # Only AVAILABLE tapes can be deleted
+                    if tape_status in ['AVAILABLE', 'RETRIEVED']:  # Only AVAILABLE/RETRIEVED tapes can be deleted via gateway
                         # Attempt deletion and track results
                         if self.delete_virtual_tape(tape_arn, bypass_governance):
                             results['deleted_tapes'] += 1
@@ -829,13 +919,39 @@ class VirtualTapeManager:
                         logger.warning(f"Skipping tape {tape_barcode} - Status: {tape_status} (not deletable)")
                         results['errors'].append(f"Tape {tape_barcode} not in deletable state: {tape_status}")
             
-            # Add summary information about archived tapes
+            # Process archived expired tapes for deletion
+            if not dry_run:
+                logger.info(f"Processing {archived_tapes_count} archived expired tapes for deletion from VTS...")
+                for tape in expired_tapes:
+                    if tape.get('TapeStatus') != 'ARCHIVED':
+                        continue
+                    
+                    tape_arn = tape['TapeARN']
+                    tape_barcode = tape.get('TapeBarcode', 'Unknown')
+                    
+                    logger.info(f"Deleting archived tape from VTS: {tape_barcode}")
+                    if self.delete_virtual_tape(tape_arn, bypass_governance):
+                        results['deleted_tapes'] += 1
+                    else:
+                        results['failed_deletions'] += 1
+                        results['errors'].append(f"Failed to delete archived tape {tape_barcode}")
+            else:
+                # Dry-run mode for archived tapes
+                for tape in expired_tapes:
+                    if tape.get('TapeStatus') != 'ARCHIVED':
+                        continue
+                    tape_barcode = tape.get('TapeBarcode', 'Unknown')
+                    tape_arn = tape['TapeARN']
+                    logger.info(f"DRY RUN: Would delete archived tape from VTS: {tape_barcode} ({tape_arn})")
+                    results['deleted_tapes'] += 1
+            
+            # Update summary information
             if archived_tapes_count > 0:
-                results['errors'].append(f"{archived_tapes_count} expired tapes are archived and cannot be deleted directly")
-                logger.warning(f"Note: {archived_tapes_count} expired tapes are archived. To delete them:")
-                logger.warning("1. Retrieve tapes from Virtual Tape Shelf (VTS) using AWS Console/CLI")
-                logger.warning("2. Wait for retrieval to complete (can take several hours)")
-                logger.warning("3. Run this script again to delete the retrieved tapes")
+                logger.info(f"Note: {archived_tapes_count} expired tapes are archived in VTS")
+                if not dry_run:
+                    logger.info("Archived tapes are deleted directly from VTS using DeleteTapeArchive API")
+                else:
+                    logger.info("Archived tapes would be deleted directly from VTS using DeleteTapeArchive API")
 
         except Exception as e:
             # Catch any unexpected errors during the process
@@ -1033,8 +1149,6 @@ Examples:
                                help='Delete expired tapes based on age threshold (default mode)')
     operation_group.add_argument('--delete-specific', action='store_true',
                                help='Delete specific tapes from a provided list')
-    operation_group.add_argument('--retrieve-archived', action='store_true',
-                               help='Retrieve archived tapes from Virtual Tape Shelf (VTS) back to gateway')
     
     # Tape list specification options
     parser.add_argument('--tape-list', 
@@ -1046,6 +1160,10 @@ Examples:
     parser.add_argument('--output-file', 
                        help='Save results to file. For --list-all: tape barcodes (one per line). For other modes: detailed results summary')
     
+    # Status filter options
+    parser.add_argument('--status-filter', 
+                       help='Filter tapes by status (use with --list-all). Comma-separated list. Valid values: AVAILABLE, RETRIEVED, ARCHIVED, CREATING, IN_TRANSIT_TO_VTS, DELETING, DELETED, IRRECOVERABLE, RECOVERING. Example: --status-filter AVAILABLE,RETRIEVED')
+    
     # Parse command-line arguments
     args = parser.parse_args()
 
@@ -1054,12 +1172,12 @@ Examples:
         logger.error("--delete-specific requires either --tape-list or --tape-file")
         sys.exit(1)
     
-    if (args.tape_list or args.tape_file) and not args.delete_specific and not args.retrieve_archived:
-        logger.error("--tape-list and --tape-file can only be used with --delete-specific or --retrieve-archived")
+    if (args.tape_list or args.tape_file) and not args.delete_specific:
+        logger.error("--tape-list and --tape-file can only be used with --delete-specific")
         sys.exit(1)
     
-    if args.retrieve_archived and not args.gateway_arn and not args.tape_list and not args.tape_file:
-        logger.error("--retrieve-archived requires --gateway-arn and either --tape-list or --tape-file")
+    if args.status_filter and not args.list_all:
+        logger.error("--status-filter can only be used with --list-all")
         sys.exit(1)
 
     # Determine execution mode: dry-run is default unless --execute is specified
@@ -1073,14 +1191,25 @@ Examples:
             logger.info(f"Output file: {args.output_file}")
     elif args.delete_specific:
         operation_mode = "delete_specific"
-    elif args.retrieve_archived:
-        operation_mode = "retrieve_archived"
     else:
         operation_mode = "delete_expired"  # Default mode
 
+    # Parse status filter if provided
+    status_filter = None
+    if args.status_filter:
+        status_filter = [status.strip().upper() for status in args.status_filter.split(',') if status.strip()]
+        # Validate status values
+        valid_statuses = ['AVAILABLE', 'RETRIEVED', 'ARCHIVED', 'CREATING', 'IN_TRANSIT_TO_VTS', 'DELETING', 'DELETED', 'IRRECOVERABLE', 'RECOVERING']
+        invalid_statuses = [s for s in status_filter if s not in valid_statuses]
+        if invalid_statuses:
+            logger.error(f"Invalid status values: {', '.join(invalid_statuses)}")
+            logger.error(f"Valid statuses: {', '.join(valid_statuses)}")
+            sys.exit(1)
+        logger.info(f"Status filter: {', '.join(status_filter)}")
+    
     # Parse tape list if provided
     tape_list = []
-    if args.delete_specific or args.retrieve_archived:
+    if args.delete_specific:
         if args.tape_list:
             # Parse comma-separated list
             tape_list = [tape.strip() for tape in args.tape_list.split(',') if tape.strip()]
@@ -1107,12 +1236,14 @@ Examples:
     logger.info(f"Operation mode: {operation_mode}")
     logger.info(f"Region: {args.region}")
     logger.info(f"Profile: {args.profile or 'default'}")
+    if operation_mode == "list_all" and status_filter:
+        logger.info(f"Status filter: {', '.join(status_filter)}")
     if operation_mode == "delete_expired":
         logger.info(f"Expiry threshold: {args.expiry_days} days")
-    elif operation_mode in ["delete_specific", "retrieve_archived"]:
+    elif operation_mode == "delete_specific":
         logger.info(f"Tapes to process: {len(tape_list)}")
     logger.info(f"Gateway ARN: {args.gateway_arn or 'all gateways'}")
-    if operation_mode not in ["list_all", "retrieve_archived"]:
+    if operation_mode != "list_all":
         logger.info(f"Mode: {'DRY RUN' if dry_run else 'EXECUTE'}")
         logger.info(f"Bypass governance: {args.bypass_governance}")
     logger.info("="*60)
@@ -1123,7 +1254,7 @@ Examples:
     # Execute the appropriate operation based on mode
     if operation_mode == "list_all":
         # List all tapes mode
-        results = tape_manager.list_all_tapes_detailed(args.gateway_arn)
+        results = tape_manager.list_all_tapes_detailed(args.gateway_arn, status_filter)
         
         # Save tape list to file if requested
         if args.output_file:
@@ -1133,7 +1264,12 @@ Examples:
                     f.write(f"# Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                     f.write(f"# Region: {args.region}\n")
                     f.write(f"# Gateway: {args.gateway_arn or 'all gateways'}\n")
-                    f.write(f"# Total tapes: {len(results.get('tape_details', []))}\n")
+                    if status_filter:
+                        f.write(f"# Status filter: {', '.join(status_filter)}\n")
+                        f.write(f"# Total tapes (before filter): {results['total_tapes']}\n")
+                        f.write(f"# Filtered tapes: {len(results.get('tape_details', []))}\n")
+                    else:
+                        f.write(f"# Total tapes: {len(results.get('tape_details', []))}\n")
                     f.write("#\n")
                     f.write("# Format: One tape barcode per line\n")
                     f.write("# Use this file with --delete-specific --tape-file\n")
@@ -1144,7 +1280,10 @@ Examples:
                         for tape in results['tape_details']:
                             f.write(f"{tape['barcode']}\n")
                     else:
-                        f.write("# No tapes found\n")
+                        if status_filter:
+                            f.write(f"# No tapes found matching status filter: {', '.join(status_filter)}\n")
+                        else:
+                            f.write("# No tapes found\n")
                 
                 logger.info(f"Tape list saved to: {args.output_file}")
                 print(f"\nTape list saved to: {args.output_file}")
@@ -1152,7 +1291,10 @@ Examples:
                 if results.get('tape_details'):
                     print(f"Use with: python3 {sys.argv[0]} --region {args.region} --delete-specific --tape-file {args.output_file}")
                 else:
-                    print("File created but contains no tapes (none were found)")
+                    if status_filter:
+                        print(f"File created but contains no tapes matching status filter: {', '.join(status_filter)}")
+                    else:
+                        print("File created but contains no tapes (none were found)")
                 
             except Exception as e:
                 logger.error(f"Failed to save tape list to file: {e}")
@@ -1172,146 +1314,43 @@ Examples:
             print("  - Incorrect region specified")
         else:
             print(f"Total tapes found: {results['total_tapes']}")
-            print(f"Total allocated size: {results['total_size_bytes']:,} bytes ({results['total_size_bytes'] / (1024**3):.2f} GB)")
-            print(f"Total used size: {results['total_used_bytes']:,} bytes ({results['total_used_bytes'] / (1024**3):.2f} GB)")
+            if status_filter:
+                print(f"Status filter applied: {', '.join(status_filter)}")
+                print(f"Tapes matching filter: {results['filtered_tapes']}")
+                if results['filtered_tapes'] == 0:
+                    print(f"\nNo tapes found with status: {', '.join(status_filter)}")
+                    print("\nAvailable statuses in this region:")
+                    all_tapes_result = tape_manager.list_all_tapes_detailed(args.gateway_arn, None)
+                    if all_tapes_result.get('tapes_by_status'):
+                        for status in all_tapes_result['tapes_by_status'].keys():
+                            print(f"  - {status}")
             
-            # Display tapes by status
-            if results['tapes_by_status']:
-                print(f"\nTapes by status:")
-                for status, tapes in results['tapes_by_status'].items():
-                    print(f"  {status}: {len(tapes)} tapes")
-            
-            # Display detailed tape information
-            if results['tape_details']:
-                print(f"\nDetailed tape information:")
-                print(f"{'Barcode':<15} {'Status':<12} {'Age (days)':<10} {'Size (GB)':<10} {'Used (GB)':<10}")
-                print("-" * 70)
-                for tape in results['tape_details']:
-                    size_gb = tape['size_bytes'] / (1024**3) if tape['size_bytes'] else 0
-                    used_gb = tape['used_bytes'] / (1024**3) if tape['used_bytes'] else 0
-                    age_str = str(tape['age_days']) if tape['age_days'] is not None else 'Unknown'
-                    print(f"{tape['barcode']:<15} {tape['status']:<12} {age_str:<10} {size_gb:<10.2f} {used_gb:<10.2f}")
+            if results['filtered_tapes'] > 0:
+                print(f"Total allocated size: {results['total_size_bytes']:,} bytes ({results['total_size_bytes'] / (1024**3):.2f} GB)")
+                print(f"Total used size: {results['total_used_bytes']:,} bytes ({results['total_used_bytes'] / (1024**3):.2f} GB)")
+                
+                # Display tapes by status
+                if results['tapes_by_status']:
+                    print(f"\nTapes by status:")
+                    for status, tapes in results['tapes_by_status'].items():
+                        print(f"  {status}: {len(tapes)} tapes")
+                
+                # Display detailed tape information
+                if results['tape_details']:
+                    print(f"\nDetailed tape information:")
+                    print(f"{'Barcode':<15} {'Status':<12} {'Age (days)':<10} {'Size (GB)':<10} {'Used (GB)':<10}")
+                    print("-" * 70)
+                    for tape in results['tape_details']:
+                        size_gb = tape['size_bytes'] / (1024**3) if tape['size_bytes'] else 0
+                        used_gb = tape['used_bytes'] / (1024**3) if tape['used_bytes'] else 0
+                        age_str = str(tape['age_days']) if tape['age_days'] is not None else 'Unknown'
+                        print(f"{tape['barcode']:<15} {tape['status']:<12} {age_str:<10} {size_gb:<10.2f} {used_gb:<10.2f}")
         
         # Display any errors
         if results['errors']:
             print(f"\nErrors encountered:")
             for error in results['errors']:
                 print(f"  - {error}")
-                
-    elif operation_mode == "retrieve_archived":
-        # Retrieve archived tapes mode
-        if not args.gateway_arn:
-            print("Error: --gateway-arn is required for tape retrieval")
-            sys.exit(1)
-            
-        # Convert tape barcodes to ARNs if needed
-        tape_arns = []
-        basic_tapes = tape_manager.list_virtual_tapes()
-        tape_lookup = {}
-        
-        # Create lookup for both ARNs and barcodes
-        for tape in basic_tapes:
-            tape_arn = tape.get('TapeARN', '')
-            tape_barcode = tape.get('TapeBarcode', '')
-            if tape_arn:
-                tape_lookup[tape_arn] = tape_arn
-            if tape_barcode:
-                tape_lookup[tape_barcode] = tape_arn
-        
-        # Convert input list to ARNs
-        for tape_id in tape_list:
-            if tape_id in tape_lookup:
-                tape_arns.append(tape_lookup[tape_id])
-            else:
-                logger.warning(f"Tape not found: {tape_id}")
-        
-        if not tape_arns:
-            print("Error: No valid tapes found for retrieval")
-            sys.exit(1)
-        
-        results = tape_manager.retrieve_archived_tapes(
-            tape_arns=tape_arns,
-            gateway_arn=args.gateway_arn
-        )
-        
-        # Display retrieval results
-        print("\n" + "="*60)
-        print("TAPE RETRIEVAL RESULTS")
-        print("="*60)
-        print(f"Tapes requested for retrieval: {results['total_tapes_requested']}")
-        print(f"Retrievals initiated: {results['retrieval_initiated']}")
-        print(f"Failed retrievals: {results['failed_retrievals']}")
-        print(f"Skipped tapes: {len(results['skipped_tapes'])}")
-        
-        # Display retrieval jobs
-        if results['retrieval_jobs']:
-            print(f"\nRetrieval jobs initiated:")
-            for job in results['retrieval_jobs']:
-                print(f"  - {job['tape_barcode']}: {job['status']}")
-        
-        # Display skipped tapes
-        if results['skipped_tapes']:
-            print(f"\nSkipped tapes:")
-            for tape in results['skipped_tapes']:
-                print(f"  - {tape['barcode']}: {tape['reason']} (Status: {tape['status']})")
-        
-        # Display errors
-        if results['errors']:
-            print(f"\nErrors encountered:")
-            for error in results['errors']:
-                print(f"  - {error}")
-        
-        # Provide next steps guidance
-        if results['retrieval_initiated'] > 0:
-            print(f"\n" + "="*60)
-            print("NEXT STEPS")
-            print("="*60)
-            print("1. Wait for retrieval to complete (typically 3-5 hours)")
-            print("2. Monitor progress with: --list-all")
-            print("3. Once tapes show status 'AVAILABLE', they can be deleted")
-            print(f"4. Delete command: --delete-specific --tape-file <your_tape_file> --execute")
-        
-        # Save results to file if requested
-        if args.output_file:
-            try:
-                with open(args.output_file, 'w') as f:
-                    f.write("# Tape Retrieval Results\n")
-                    f.write(f"# Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                    f.write(f"# Region: {args.region}\n")
-                    f.write(f"# Gateway: {args.gateway_arn}\n")
-                    f.write("#\n")
-                    f.write(f"# Tapes requested: {results['total_tapes_requested']}\n")
-                    f.write(f"# Retrievals initiated: {results['retrieval_initiated']}\n")
-                    f.write(f"# Failed retrievals: {results['failed_retrievals']}\n")
-                    f.write(f"# Skipped tapes: {len(results['skipped_tapes'])}\n")
-                    f.write("#\n\n")
-                    
-                    # Write retrieval jobs
-                    if results['retrieval_jobs']:
-                        f.write("# Retrieval Jobs Initiated:\n")
-                        for job in results['retrieval_jobs']:
-                            f.write(f"{job['tape_barcode']}\t{job['status']}\t{job['initiated_at']}\n")
-                        f.write("\n")
-                    
-                    # Write skipped tapes
-                    if results['skipped_tapes']:
-                        f.write("# Skipped Tapes:\n")
-                        for tape in results['skipped_tapes']:
-                            f.write(f"# {tape['barcode']}\t{tape['status']}\t{tape['reason']}\n")
-                        f.write("\n")
-                    
-                    # Write errors
-                    if results['errors']:
-                        f.write("# Errors:\n")
-                        for error in results['errors']:
-                            f.write(f"# {error}\n")
-                
-                logger.info(f"Retrieval results saved to: {args.output_file}")
-                print(f"\nRetrieval results saved to: {args.output_file}")
-                
-            except Exception as e:
-                logger.error(f"Failed to save retrieval results to file: {e}")
-                print(f"Error: Failed to save results to {args.output_file}: {e}")
                 
     elif operation_mode == "delete_specific":
         # Delete specific tapes mode
