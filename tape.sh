@@ -39,17 +39,24 @@ OPTIONS:
     --region REGION     AWS region (required)
     --profile PROFILE   AWS profile (optional)
     --days DAYS         Age threshold in days (default: 60)
-    --status STATUS     Filter by status (ARCHIVED, AVAILABLE, etc.)
+    --status STATUS     Filter by status (ARCHIVED, AVAILABLE, RETRIEVED, etc.)
     --tapes LIST        Comma-separated tape list
-    --output FILE       Save results to file
+    --output FILE       Save tape list to file
+    --format FORMAT     Output format: arn (default) or barcode
     --execute           Actually delete (default is dry-run)
 
 EXAMPLES:
     # List all tapes
     $0 list --region us-east-1
 
-    # List archived tapes
-    $0 list --region us-east-1 --status ARCHIVED
+    # List archived tapes and save ARNs to file
+    $0 list --region us-east-1 --status ARCHIVED --output archived_arns.txt
+
+    # List archived tapes and save barcodes to file
+    $0 list --region us-east-1 --status ARCHIVED --output archived_barcodes.txt --format barcode
+
+    # List retrieved tapes (case-insensitive)
+    $0 list --region us-east-1 --status retrieved
 
     # Delete old tapes (test)
     $0 delete-old --region us-east-1 --days 60
@@ -59,6 +66,12 @@ EXAMPLES:
 
     # Delete specific tapes
     $0 delete --region us-east-1 --tapes VTL001,VTL002 --execute
+
+NOTE:
+    - Output files contain tape ARNs (default) or barcodes (with --format barcode)
+    - Format: one item per line with header comments
+    - Status filter is case-insensitive (RETRIEVED = retrieved = Retrieved)
+    - Use --output to save full list for scripting
 
 EOF
 }

@@ -85,14 +85,15 @@ def delete_expired_tapes(manager: TapeManager, expiry_days: int, dry_run: bool =
             results['expired_tapes'] += 1
             
             if dry_run:
-                logger.info(f"DRY RUN: Would delete {tape_barcode}")
+                logger.info(f"DRY RUN: Would delete {tape_barcode} (ARN: {tape_arn})")
                 results['deleted'] += 1
             else:
+                logger.info(f"Deleting tape: {tape_barcode} (ARN: {tape_arn})")
                 if manager.delete_tape(tape_arn, tape_status):
                     results['deleted'] += 1
                 else:
                     results['failed'] += 1
-                    results['errors'].append(f"Failed to delete {tape_barcode}")
+                    results['errors'].append(f"Failed to delete {tape_barcode} (ARN: {tape_arn})")
     
     return results
 
@@ -145,13 +146,14 @@ def delete_specific_tapes(manager: TapeManager, tape_identifiers: List[str], dry
         tape_status = tape.get('TapeStatus', 'Unknown')
         
         if dry_run:
-            logger.info(f"DRY RUN: Would delete {tape_barcode} (Status: {tape_status})")
+            logger.info(f"DRY RUN: Would delete {tape_barcode} (Status: {tape_status}, ARN: {tape_arn})")
             results['deleted'] += 1
         else:
+            logger.info(f"Deleting tape: {tape_barcode} (Status: {tape_status}, ARN: {tape_arn})")
             if manager.delete_tape(tape_arn, tape_status):
                 results['deleted'] += 1
             else:
                 results['failed'] += 1
-                results['errors'].append(f"Failed to delete {tape_barcode}")
+                results['errors'].append(f"Failed to delete {tape_barcode} (ARN: {tape_arn})")
     
     return results

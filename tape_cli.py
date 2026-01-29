@@ -31,6 +31,12 @@ Examples:
   # List only archived tapes
   python3 tape_cli.py --region us-east-1 --list --status ARCHIVED
 
+  # Save tape ARNs to file
+  python3 tape_cli.py --region us-east-1 --list --output tapes.txt
+
+  # Save tape barcodes to file
+  python3 tape_cli.py --region us-east-1 --list --output tapes.txt --format barcode
+
   # Delete expired tapes (dry-run)
   python3 tape_cli.py --region us-east-1 --delete-expired --days 60
 
@@ -57,6 +63,8 @@ Examples:
     parser.add_argument('--days', type=int, default=60, help='Expiry threshold in days (default: 60)')
     parser.add_argument('--execute', action='store_true', help='Actually delete (default is dry-run)')
     parser.add_argument('--output', help='Save tape list to file')
+    parser.add_argument('--format', choices=['arn', 'barcode'], default='arn', 
+                       help='Output format: arn (default) or barcode')
     
     args = parser.parse_args()
     
@@ -99,16 +107,39 @@ Examples:
             for status, tapes in sorted(results['by_status'].items()):
                 print(f"  {status}: {len(tapes)}")
         
+        # Display detailed tape information
+        if results['tapes']:
+            print("\nTape Details:")
+            print(f"{'Barcode':<20} {'Status':<15} {'ARN'}")
+            print("-" * 100)
+            for tape in results['tapes'][:10]:  # Show first 10 tapes
+                barcode = tape.get('TapeBarcode', 'Unknown')
+                status = tape.get('TapeStatus', 'Unknown')
+                arn = tape.get('TapeARN', 'Unknown')
+                print(f"{barcode:<20} {status:<15} {arn}")
+            
+            if len(results['tapes']) > 10:
+                print(f"\n... and {len(results['tapes']) - 10} more tapes")
+                print("(Use --output to save full list with all ARNs)")
+        
         # Save to file if requested
         if args.output:
             with open(args.output, 'w') as f:
                 f.write("# Tape Inventory\n")
                 if results['filter_applied']:
                     f.write(f"# Filter: {', '.join(status_filter)}\n")
-                f.write(f"# Total: {results['total']}\n\n")
+                f.write(f"# Total: {results['total']}\n")
+                f.write(f"# Format: {args.format}\n\n")
+                
                 for tape in results['tapes']:
-                    f.write(f"{tape.get('TapeBarcode', 'Unknown')}\n")
-            print(f"\nSaved to: {args.output}")
+                    if args.format == 'barcode':
+                        barcode = tape.get('TapeBarcode', 'Unknown')
+                        f.write(f"{barcode}\n")
+                    else:  # arn (default)
+                        arn = tape.get('TapeARN', 'Unknown')
+                        f.write(f"{arn}\n")
+            
+            print(f"\nSaved to: {args.output} (format: {args.format})")
     
     elif args.delete_expired:
         # Delete expired

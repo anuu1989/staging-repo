@@ -77,6 +77,10 @@ class TapeManager:
                 
                 all_tapes.extend(tapes)
                 
+                # Log tape ARNs for debugging
+                for tape in tapes:
+                    logger.debug(f"Found tape: {tape.get('TapeBarcode')} - ARN: {tape.get('TapeARN')} - Status: {tape.get('TapeStatus')}")
+                
                 marker = response.get('Marker')
                 if not marker:
                     break
@@ -100,13 +104,15 @@ class TapeManager:
             True if successful, False otherwise
         """
         try:
+            logger.info(f"Attempting to delete tape: ARN={tape_arn}, Status={tape_status}")
+            
             if tape_status == 'ARCHIVED':
                 # Delete from VTS
                 self._retry_api_call(
                     self.storagegateway.delete_tape_archive,
                     TapeARN=tape_arn
                 )
-                logger.info(f"Deleted archived tape: {tape_arn}")
+                logger.info(f"Successfully deleted archived tape: {tape_arn}")
             else:
                 # Delete from gateway
                 gateway_arn = self._find_gateway_for_tape(tape_arn)
@@ -114,12 +120,13 @@ class TapeManager:
                     logger.error(f"Could not find gateway for tape: {tape_arn}")
                     return False
                 
+                logger.info(f"Deleting active tape from gateway: {gateway_arn}")
                 self._retry_api_call(
                     self.storagegateway.delete_tape,
                     GatewayARN=gateway_arn,
                     TapeARN=tape_arn
                 )
-                logger.info(f"Deleted active tape: {tape_arn}")
+                logger.info(f"Successfully deleted active tape: {tape_arn}")
             
             return True
             
