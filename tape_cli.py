@@ -80,17 +80,31 @@ Examples:
         print("\n" + "="*60)
         print("TAPE INVENTORY")
         print("="*60)
-        print(f"Total tapes: {results['total']}")
+        
+        # Show all available statuses in the system
+        if results.get('all_statuses'):
+            print(f"\nAvailable statuses in system: {', '.join(results['all_statuses'])}")
+            print(f"(Status filter is case-insensitive)")
+        
+        # Show filter info
+        if results['filter_applied']:
+            print(f"\nFilter applied: {', '.join(status_filter)}")
+            print(f"Total tapes (unfiltered): {results['total_all']}")
+            print(f"Matching tapes (filtered): {results['total']}")
+        else:
+            print(f"\nTotal tapes: {results['total']}")
         
         if results['by_status']:
-            print("\nBy status:")
-            for status, tapes in results['by_status'].items():
+            print("\nBreakdown by status:")
+            for status, tapes in sorted(results['by_status'].items()):
                 print(f"  {status}: {len(tapes)}")
         
         # Save to file if requested
         if args.output:
             with open(args.output, 'w') as f:
                 f.write("# Tape Inventory\n")
+                if results['filter_applied']:
+                    f.write(f"# Filter: {', '.join(status_filter)}\n")
                 f.write(f"# Total: {results['total']}\n\n")
                 for tape in results['tapes']:
                     f.write(f"{tape.get('TapeBarcode', 'Unknown')}\n")

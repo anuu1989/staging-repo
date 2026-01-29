@@ -19,7 +19,20 @@ def inventory_tapes(manager: TapeManager, status_filter: List[str] = None) -> Di
     Returns:
         Dictionary with tape counts and details
     """
-    tapes = manager.list_tapes(status_filter)
+    # Get all tapes first to show available statuses
+    all_tapes = manager.list_tapes(None)
+    
+    # Collect all unique statuses
+    all_statuses = set()
+    for tape in all_tapes:
+        status = tape.get('TapeStatus', 'Unknown')
+        all_statuses.add(status)
+    
+    # Now apply filter if specified
+    if status_filter:
+        tapes = manager.list_tapes(status_filter)
+    else:
+        tapes = all_tapes
     
     # Group by status
     by_status = {}
@@ -31,8 +44,11 @@ def inventory_tapes(manager: TapeManager, status_filter: List[str] = None) -> Di
     
     return {
         'total': len(tapes),
+        'total_all': len(all_tapes),
         'by_status': by_status,
-        'tapes': tapes
+        'tapes': tapes,
+        'all_statuses': sorted(all_statuses),
+        'filter_applied': status_filter is not None
     }
 
 

@@ -38,6 +38,7 @@ class TapeManager:
         
         Args:
             status_filter: Optional list of statuses to filter (e.g., ['AVAILABLE', 'ARCHIVED'])
+                          Case-insensitive matching
         
         Returns:
             List of tape dictionaries with barcode, status, size info
@@ -45,6 +46,11 @@ class TapeManager:
         try:
             all_tapes = []
             marker = None
+            
+            # Normalize status filter to uppercase for case-insensitive matching
+            if status_filter:
+                status_filter = [s.upper() for s in status_filter]
+                logger.debug(f"Filtering by status: {status_filter}")
             
             while True:
                 params = {'Limit': 100}
@@ -58,9 +64,16 @@ class TapeManager:
                 
                 tapes = response.get('TapeInfos', [])
                 
-                # Apply status filter if specified
+                # Apply status filter if specified (case-insensitive)
                 if status_filter:
-                    tapes = [t for t in tapes if t.get('TapeStatus') in status_filter]
+                    filtered_tapes = []
+                    for tape in tapes:
+                        tape_status = tape.get('TapeStatus', '').upper()
+                        if tape_status in status_filter:
+                            filtered_tapes.append(tape)
+                        else:
+                            logger.debug(f"Tape {tape.get('TapeBarcode')} status '{tape.get('TapeStatus')}' not in filter")
+                    tapes = filtered_tapes
                 
                 all_tapes.extend(tapes)
                 
@@ -68,7 +81,7 @@ class TapeManager:
                 if not marker:
                     break
             
-            logger.info(f"Found {len(all_tapes)} tapes")
+            logger.info(f"Found {len(all_tapes)} tapes" + (f" matching status filter" if status_filter else ""))
             return all_tapes
             
         except Exception as e:
